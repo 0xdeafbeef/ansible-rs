@@ -9,3 +9,4 @@ edition = "2018"
 [dependencies]
 ssh2="0.6.0"
 clap="2.33.0"
+evmap = "7.1.3"
