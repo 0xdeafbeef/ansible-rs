@@ -1,5 +1,3 @@
-extern crate rayon_logs as rayon;
-
 use clap::{App, Arg};
 use ssh2::{Session, Agent};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -85,7 +83,7 @@ fn main() {
         .get_matches();
     let hosts = hosts_builder(Path::new(&args.value_of("config").unwrap()));
 //    rayon::ThreadPoolBuilder::new().num_threads(1).build_global().unwrap();
-    let pool = ThreadPoolBuilder::new().num_threads(100).build().expect("failed creating pool");
+    let pool = ThreadPoolBuilder::new().num_threads(107).build().expect("failed creating pool");
    pool.install(|| hosts.par_iter()
         .map(|x| process_host(x))
         .for_each(|x| println!("{:?}", x)));
