@@ -12,7 +12,7 @@ use rayon::ThreadPoolBuilder;
 use std::time::Instant;
 use humantime::format_duration;
 use std::fs;
-use indicatif::{ParallelProgressIterator, ProgressBar};
+use indicatif::{ProgressBar, ProgressStyle};
 
 #[derive(Serialize, Debug)]
 struct Response {
@@ -237,10 +237,16 @@ fn main() {
     let pool = ThreadPoolBuilder::new().num_threads(config.threads).build().expect("failed creating pool");
     let command = &config.command;
     let element_nums = hosts.len() as u64;
+    let style = ProgressStyle::default_bar()
+        .template("{eta} {wide_bar:80.yellow} Hosts processed: {pos}/{len}")
+        .progress_chars("##-");
     let pb = ProgressBar::new(element_nums);
+    pb.set_style(style.clone());
+    pb.tick();
     let result: Vec<Response> = pool.install(
         || hosts.par_iter()
-            .map(|x| process_host(x, &command, &pb)).collect());
+            .map(|x| process_host(x, &command, &pb))
+            .collect());
     pb.finish_and_clear();
     if config.output.save_to_file {
         save_to_file(&config, result);
