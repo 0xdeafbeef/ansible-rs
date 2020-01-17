@@ -57,20 +57,14 @@ fn process_host<A>(
     let start_time = Instant::now();
     let tcp = match TcpStream::connect(&hostname) {
         Ok(a) => a,
-        Err(e) => {
-            return contruct_error(&hostname, start_time, e.to_string(), &bar, &tx);
-        }
+        Err(e) => return contruct_error(&hostname, start_time, e.to_string(), &bar, &tx)
     };
     let mut sess = match Session::new() {
         Ok(a) => a,
-        Err(e) => {
-            // todo logging
-            return contruct_error(&hostname, start_time, e.to_string(), &bar, &tx);
-        }
+        Err(e) => return contruct_error(&hostname, start_time, e.to_string(), &bar, &tx)
     };
     const TIMEOUT: u32 = 6000;
     sess.set_timeout(TIMEOUT);
-
     sess.set_tcp_stream(tcp);
     match sess.handshake() {
         Ok(a) => a,
@@ -158,6 +152,7 @@ struct Config {
     threads: usize,
     output: OutputProps,
     command: String,
+    timeout: u32,
 }
 
 impl Default for OutputProps {
@@ -178,6 +173,7 @@ impl Default for Config {
             threads: 10,
             command: String::default(),
             output: OutputProps::default(),
+            timeout: 60,
         }
     }
 }
@@ -333,7 +329,7 @@ fn incremental_save(rx: Receiver<Option<Response>>, props: &OutputProps, queue_l
 
 fn pb_creator(element_nums: u64) -> ProgressBar {
     let style = ProgressStyle::default_bar()
-        .template("{eta} {wide_bar:80.yellow} Hosts processed: {pos}/{len}")
+        .template("{eta} {wide_bar} Hosts processed: {pos}/{len}  Speed: {per_sec}")
         .progress_chars("##-");
     let pb = ProgressBar::new(element_nums);
     pb.set_style(style.clone());
