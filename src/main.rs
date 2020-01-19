@@ -1,3 +1,4 @@
+use clap::{App, Arg};
 use std::fmt::Display;
 use std::fs;
 use std::fs::File;
@@ -7,15 +8,12 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::path::Path;
 use std::sync::mpsc;
 use std::sync::mpsc::{Receiver, SyncSender};
-use std::thread::sleep;
 use std::time::UNIX_EPOCH;
 use std::time::{Duration, Instant};
 
-use clap::{App, Arg};
 use color_backtrace;
 use humantime::format_duration;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-use rand::prelude::*;
 use rayon::prelude::*;
 use rayon::{spawn, ThreadPoolBuilder};
 use serde::{Deserialize, Serialize};
@@ -133,11 +131,13 @@ fn hosts_builder(path: &Path) -> Vec<String> {
         .map(|l| l + ":22")
         .collect::<Vec<String>>()
 }
-
+#[cfg(debug_asserions)]
 fn process_host_test<A>(hostname: A, command: &str, tx: SyncSender<Response>) -> Response
 where
     A: Display + ToSocketAddrs,
 {
+    use rand::prelude::*;
+    use std::thread::sleep;
     let start_time = Instant::now();
     let mut rng = rand::rngs::OsRng;
     let stat: bool = rng.gen();
@@ -302,7 +302,7 @@ fn main() {
     spawn(move || incremental_save(rx, &props, queue_len, incremental_name.as_str()));
     let result: Vec<Response> = hosts
         .par_iter()
-        .map(|x| process_host_test(x, &command, tx.clone()))
+        .map(|x| process_host(x, &command, tx.clone()))
         .collect();
     if config.output.save_to_file {
         save_to_file(&config, result);
@@ -348,7 +348,7 @@ fn incremental_save(rx: Receiver<Response>, props: &OutputProps, queue_len: u64,
     let total = progress_bar_creator(queue_len);
     let mut ok = 0;
     let mut ko = 0;
-    file.write(b"[\r\n")
+    file.write_all(b"[\r\n")
         .expect("Writing for incremental saving failed");
     for _ in 0..=queue_len {
         let received = match rx.recv() {
@@ -367,9 +367,9 @@ fn incremental_save(rx: Receiver<Response>, props: &OutputProps, queue_len: u64,
         total.set_message(&format!("OK: {}, Failed: {}", ok, ko));
         let mut data = serde_json::to_string_pretty(&received).unwrap();
         data += ",\n";
-        file.write(data.as_bytes())
+        file.write_all(data.as_bytes())
             .expect("Writing for incremental saving failed");
     }
-    file.write(b"\n]")
+    file.write_all(b"\n]")
         .expect("Writing for incremental saving failed");
 }
