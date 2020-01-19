@@ -1,12 +1,3 @@
-use clap::{App, Arg};
-use color_backtrace;
-use humantime::format_duration;
-use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
-use rand::prelude::*;
-use rayon::prelude::*;
-use rayon::{spawn, ThreadPoolBuilder};
-use serde::{Deserialize, Serialize};
-use ssh2::{Error, PublicKey, Session};
 use std::fmt::Display;
 use std::fs;
 use std::fs::File;
@@ -15,10 +6,20 @@ use std::io::{BufReader, Read};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::Path;
 use std::sync::mpsc;
-use std::sync::mpsc::{Receiver, Sender, SyncSender};
+use std::sync::mpsc::{Receiver, SyncSender};
 use std::thread::sleep;
 use std::time::UNIX_EPOCH;
 use std::time::{Duration, Instant};
+
+use clap::{App, Arg};
+use color_backtrace;
+use humantime::format_duration;
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use rand::prelude::*;
+use rayon::prelude::*;
+use rayon::{spawn, ThreadPoolBuilder};
+use serde::{Deserialize, Serialize};
+use ssh2::{Error, PublicKey, Session};
 
 #[derive(Serialize, Debug, Clone)]
 struct Response {
@@ -28,7 +29,7 @@ struct Response {
     status: bool,
 }
 
-fn construct_error_test<A>(
+fn construct_error<A>(
     hostname: &A,
     start_time: Instant,
     e: String,
@@ -50,86 +51,76 @@ where
     response
 }
 
-//fn process_host<A>(
-//	hostname: A,
-//	command: &str,
-//	bar: &ProgressBar,
-//	tx: SyncSender<Option<Response>>,
-//) -> Response
-//	where
-//		A: ToSocketAddrs + Display,
-//{
-//	let start_time = Instant::now();
-//	let tcp = match TcpStream::connect(&hostname) {
-//		Ok(a) => a,
-//		Err(e) => return construct_error(&hostname, start_time, e.to_string(), &bar, &tx),
-//	};
-//	let mut sess = match Session::new() {
-//		Ok(a) => a,
-//		Err(e) => return construct_error(&hostname, start_time, e.to_string(), &bar, &tx),
-//	};
-//	const TIMEOUT: u32 = 6000;
-//	sess.set_timeout(TIMEOUT);
-//	sess.set_tcp_stream(tcp);
-//	match sess.handshake() {
-//		Ok(a) => a,
-//		Err(e) => {
-//			return construct_error(&hostname, start_time, e.to_string(), &bar, &tx);
-//		}
-//	};
-//
-//	// Try to authenticate with the first identity in the agent.
-//	let mut agent = match sess.agent() {
-//		Ok(a) => a,
-//		Err(e) => {
-//			return construct_error(&hostname, start_time, e.to_string(), &bar, &tx);
-//		}
-//	};
-//	match agent.connect() {
-//		Ok(_) => (),
-//		Err(e) => {
-//			return construct_error(&hostname, start_time, e.to_string(), &bar, &tx);
-//		}
-//	};
-//	match agent.list_identities() {
-//		Err(e) => return construct_error(&hostname, start_time, e.to_string(), &bar, &tx),
-//		_ => {}
-//	};
-//	let id: Vec<Result<PublicKey, Error>> = agent.identities().collect();
-//
-//	let key = id[0].as_ref().unwrap();
-//	match agent.userauth("scan", &key) {
-//		Ok(_) => (),
-//		Err(e) => return construct_error(&hostname, start_time, e.to_string(), &bar, &tx),
-//	};
-//	let mut channel = match sess.channel_session() {
-//		Ok(a) => a,
-//		Err(e) => {
-//			return construct_error(&hostname, start_time, e.to_string(), &bar, &tx);
-//		}
-//	};
-//	channel.exec(command).unwrap();
-//	let mut s = String::new();
-//	match channel.read_to_string(&mut s) {
-//		Err(e) => {
-//			return construct_error(&hostname, start_time, e.to_string(), &bar, &tx);
-//		}
-//		_ => (),
-//	};
-//	let end_time = Instant::now();
-//	bar.inc(1);
-//	let response = Response {
-//		hostname: hostname.to_string(),
-//		result: s,
-//		process_time: format_duration(end_time - start_time).to_string(),
-//		status: true,
-//	};
-//	match tx.send(Some(response.clone())) {
-//		Ok(_) => (),
-//		Err(e) => eprintln!("Error sending response {}", e),
-//	};
-//	response
-//}
+fn process_host<A>(hostname: A, command: &str, tx: SyncSender<Response>) -> Response
+where
+    A: ToSocketAddrs + Display,
+{
+    let start_time = Instant::now();
+    let tcp = match TcpStream::connect(&hostname) {
+        Ok(a) => a,
+        Err(e) => return construct_error(&hostname, start_time, e.to_string(), &tx),
+    };
+    let mut sess = match Session::new() {
+        Ok(a) => a,
+        Err(e) => return construct_error(&hostname, start_time, e.to_string(), &tx),
+    };
+    const TIMEOUT: u32 = 6000;
+    sess.set_timeout(TIMEOUT);
+    sess.set_tcp_stream(tcp);
+    match sess.handshake() {
+        Ok(a) => a,
+        Err(e) => {
+            return construct_error(&hostname, start_time, e.to_string(), &tx);
+        }
+    };
+
+    // Try to authenticate with the first identity in the agent.
+    let mut agent = match sess.agent() {
+        Ok(a) => a,
+        Err(e) => {
+            return construct_error(&hostname, start_time, e.to_string(), &tx);
+        }
+    };
+    match agent.connect() {
+        Ok(_) => (),
+        Err(e) => {
+            return construct_error(&hostname, start_time, e.to_string(), &tx);
+        }
+    };
+    if let Err(e) = agent.list_identities() {
+        return construct_error(&hostname, start_time, e.to_string(), &tx);
+    };
+    let id: Vec<Result<PublicKey, Error>> = agent.identities().collect();
+
+    let key = id[0].as_ref().unwrap();
+    match agent.userauth("scan", &key) {
+        Ok(_) => (),
+        Err(e) => return construct_error(&hostname, start_time, e.to_string(), &tx),
+    };
+    let mut channel = match sess.channel_session() {
+        Ok(a) => a,
+        Err(e) => {
+            return construct_error(&hostname, start_time, e.to_string(), &tx);
+        }
+    };
+    channel.exec(command).unwrap();
+    let mut s = String::new();
+    if let Err(e) = channel.read_to_string(&mut s) {
+        return construct_error(&hostname, start_time, e.to_string(), &tx);
+    };
+    let end_time = Instant::now();
+    let response = Response {
+        hostname: hostname.to_string(),
+        result: s,
+        process_time: format_duration(end_time - start_time).to_string(),
+        status: true,
+    };
+    match tx.send(response.clone()) {
+        Ok(_) => (),
+        Err(e) => eprintln!("Error sending response {}", e),
+    };
+    response
+}
 
 fn hosts_builder(path: &Path) -> Vec<String> {
     let file = File::open(path).expect("Unable to open the file");
@@ -148,12 +139,12 @@ where
     A: Display + ToSocketAddrs,
 {
     let start_time = Instant::now();
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rngs::OsRng;
     let stat: bool = rng.gen();
     let wait_time = rng.gen_range(2, 15);
     sleep(Duration::from_secs(wait_time));
     if !stat {
-        return construct_error_test(
+        return construct_error(
             &hostname,
             start_time,
             "Proizoshel trolling".to_string(),
@@ -169,7 +160,7 @@ where
     };
     match tx.send(response.clone()) {
         Ok(_) => (),
-        Err(e) => eprintln!("Error sending data via channel"),
+        Err(e) => eprintln!("Error sending data via channel: {}", e),
     };
     response
 }
@@ -249,29 +240,29 @@ fn save_to_file(conf: &Config, data: Vec<Response>) {
             return;
         }
     };
-    match conf.output.pretty_format {
-        true => {
-            match serde_json::to_writer_pretty(file, &data) {
-                Ok(_) => println!("Saved successfully"),
-                Err(e) => eprintln!("Error saving: {}", e),
-            };
-        }
-        false => match serde_json::to_writer(file, &data) {
+    if conf.output.pretty_format {
+        match serde_json::to_writer_pretty(file, &data) {
             Ok(_) => println!("Saved successfully"),
             Err(e) => eprintln!("Error saving: {}", e),
-        },
+        };
+    } else {
+        match serde_json::to_writer(file, &data) {
+            Ok(_) => println!("Saved successfully"),
+            Err(e) => eprintln!("Error saving: {}", e),
+        }
     }
 }
 
 fn save_to_console(conf: &Config, data: &Vec<Response>) {
-    match conf.output.pretty_format {
-        true => println!("{}", serde_json::to_string_pretty(&data).unwrap()),
-        false => println!("{}", serde_json::to_string(&data).unwrap()),
+    if conf.output.pretty_format {
+        println!("{}", serde_json::to_string_pretty(&data).unwrap())
+    } else {
+        println!("{}", serde_json::to_string(&data).unwrap())
     }
 }
 
 fn main() {
-    //	color_backtrace::install();
+    color_backtrace::install();
     let args = App::new("SSH analyzer")
         .arg(
             Arg::with_name("config")
@@ -293,9 +284,9 @@ fn main() {
     let hosts = hosts_builder(Path::new(&args.value_of("hosts").unwrap()));
     let config = get_config(Path::new(&args.value_of("config").unwrap()));
     dbg!(&config);
-    let pool = ThreadPoolBuilder::new()
+    ThreadPoolBuilder::new()
         .num_threads(config.threads)
-        .build()
+        .build_global()
         .expect("failed creating pool");
     let command = &config.command;
     let (tx, rx): (SyncSender<Response>, Receiver<Response>) = mpsc::sync_channel(0);
@@ -309,12 +300,10 @@ fn main() {
     let incremental_name = format!("incremental_{}.json", &datetime);
     let inc_for_closure = incremental_name.clone();
     spawn(move || incremental_save(rx, &props, queue_len, incremental_name.as_str()));
-    let result: Vec<Response> = pool.install(|| {
-        hosts
-            .par_iter()
-            .map(|x| process_host_test(x, &command, tx.clone()))
-            .collect()
-    });
+    let result: Vec<Response> = hosts
+        .par_iter()
+        .map(|x| process_host_test(x, &command, tx.clone()))
+        .collect();
     if config.output.save_to_file {
         save_to_file(&config, result);
     } else {
@@ -359,9 +348,9 @@ fn incremental_save(rx: Receiver<Response>, props: &OutputProps, queue_len: u64,
     let total = progress_bar_creator(queue_len);
     let mut ok = 0;
     let mut ko = 0;
-    file.write("[\r\n".as_bytes())
+    file.write(b"[\r\n")
         .expect("Writing for incremental saving failed");
-    for _ in 0..queue_len + 1 {
+    for _ in 0..=queue_len {
         let received = match rx.recv() {
             Ok(a) => a,
             Err(e) => {
@@ -369,9 +358,10 @@ fn incremental_save(rx: Receiver<Response>, props: &OutputProps, queue_len: u64,
                 break;
             }
         };
-        match received.status {
-            true => ok += 1,
-            false => ko += 1,
+        if received.status {
+            ok += 1
+        } else {
+            ko += 1
         };
         total.inc(1);
         total.set_message(&format!("OK: {}, Failed: {}", ok, ko));
@@ -380,6 +370,6 @@ fn incremental_save(rx: Receiver<Response>, props: &OutputProps, queue_len: u64,
         file.write(data.as_bytes())
             .expect("Writing for incremental saving failed");
     }
-    file.write("\n]".as_bytes())
+    file.write(b"\n]")
         .expect("Writing for incremental saving failed");
 }
