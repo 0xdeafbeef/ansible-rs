@@ -4,21 +4,23 @@ use std::fs;
 use std::fs::File;
 use std::io::prelude::*;
 use std::io::{BufReader, Read};
-use std::net::{TcpStream, ToSocketAddrs};
 use std::path::Path;
 use std::sync::mpsc;
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::time::UNIX_EPOCH;
 use std::time::{Duration, Instant};
-
 use color_backtrace;
 use humantime::format_duration;
-use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-use rayon::prelude::*;
-use rayon::{spawn, ThreadPoolBuilder};
+use indicatif::{ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
-use ssh2::{Error, PublicKey, Session};
-
+//use ssh2::{Error, PublicKey, Session};
+use async_ssh2::{Error, PublicKey, Session};
+use tokio::sync::Semaphore;
+use tokio::prelude::*;
+use std::thread::spawn;
+use std::net::{TcpStream, ToSocketAddrs};
+use tokio::runtime::Builder;
+use tokio::stream::*;
 #[derive(Serialize, Debug, Clone)]
 struct Response {
     result: String,
@@ -49,23 +51,29 @@ where
     response
 }
 
-fn process_host<A>(hostname: A, command: &str, tx: SyncSender<Response>) -> Response
+
+async fn process_host<A>(hostname: A, command: &str, tx: SyncSender<Response>, connection_pool:Semaphore) -> Response
 where
     A: ToSocketAddrs + Display,
 {
+    connection_pool.acquire().await;
     let start_time = Instant::now();
-    let tcp = match TcpStream::connect(&hostname) {
-        Ok(a) => a,
-        Err(e) => return construct_error(&hostname, start_time, e.to_string(), &tx),
-    };
+    let tcp = match TcpStream::connect(&hostname)
+        {
+            Ok(a)=>a,
+            Err(e) => return construct_error(&hostname, start_time, e.to_string(), &tx)
+        };
     let mut sess = match Session::new() {
         Ok(a) => a,
         Err(e) => return construct_error(&hostname, start_time, e.to_string(), &tx),
     };
     const TIMEOUT: u32 = 6000;
     sess.set_timeout(TIMEOUT);
-    sess.set_tcp_stream(tcp);
-    match sess.handshake() {
+   
+    if let Err(e)  =sess.set_tcp_stream(tcp){
+        return construct_error(&hostname, start_time, e.to_string(), &tx);
+    };
+    match sess.handshake().await {
         Ok(a) => a,
         Err(e) => {
             return construct_error(&hostname, start_time, e.to_string(), &tx);
@@ -79,37 +87,34 @@ where
             return construct_error(&hostname, start_time, e.to_string(), &tx);
         }
     };
-    match agent.connect() {
+    match agent.connect().await {
         Ok(_) => (),
         Err(e) => {
-            return construct_error(&hostname, start_time, e.to_string(), &tx);
+            return construct_error(&hostname, start_time, e.to_string(), &tx)
         }
     };
-    if let Err(e) = agent.list_identities() {
+    if let Err(e)=  sess.userauth_agent("scan").await{
         return construct_error(&hostname, start_time, e.to_string(), &tx);
-    };
-    let id: Vec<Result<PublicKey, Error>> = agent.identities().collect();
+    } ;
+    
 
-    let key = id[0].as_ref().unwrap();
-    match agent.userauth("scan", &key) {
-        Ok(_) => (),
-        Err(e) => return construct_error(&hostname, start_time, e.to_string(), &tx),
-    };
-    let mut channel = match sess.channel_session() {
+    let mut channel = match sess.channel_session().await {
         Ok(a) => a,
         Err(e) => {
             return construct_error(&hostname, start_time, e.to_string(), &tx);
         }
     };
-    channel.exec(command).unwrap();
+    if let Err(e) =   channel.exec(command).await{
+        return construct_error(&hostname, start_time, e.to_string(), &tx)
+    };
     let mut s = String::new();
-    if let Err(e) = channel.read_to_string(&mut s) {
+    if let Err(e) = channel.read_to_string(&mut s).await {
         return construct_error(&hostname, start_time, e.to_string(), &tx);
     };
     let end_time = Instant::now();
     let response = Response {
         hostname: hostname.to_string(),
-        result: s,
+        result: "".to_string(),
         process_time: format_duration(end_time - start_time).to_string(),
         status: true,
     };
@@ -125,10 +130,7 @@ fn hosts_builder(path: &Path) -> Vec<String> {
     let reader = BufReader::new(file);
     reader
         .lines()
-        .map(|l| l.unwrap_or("Error reading line".to_string()))
-        .map(|l| l.replace("\"", ""))
-        .map(|l| l.replace("'", ""))
-        .map(|l| l + ":22")
+        .map(|l| l.unwrap() + ":22")
         .collect::<Vec<String>>()
 }
 #[cfg(debug_asserions)]
@@ -284,10 +286,7 @@ fn main() {
     let hosts = hosts_builder(Path::new(&args.value_of("hosts").unwrap()));
     let config = get_config(Path::new(&args.value_of("config").unwrap()));
     dbg!(&config);
-    ThreadPoolBuilder::new()
-        .num_threads(config.threads)
-        .build_global()
-        .expect("failed creating pool");
+   
     let command = &config.command;
     let (tx, rx): (SyncSender<Response>, Receiver<Response>) = mpsc::sync_channel(0);
     let props = config.output.clone();
@@ -300,15 +299,22 @@ fn main() {
     let incremental_name = format!("incremental_{}.json", &datetime);
     let inc_for_closure = incremental_name.clone();
     spawn(move || incremental_save(rx, &props, queue_len, incremental_name.as_str()));
-    let result: Vec<Response> = hosts
-        .par_iter()
-        .map(|x| process_host(x, &command, tx.clone()))
-        .collect();
-    if config.output.save_to_file {
-        save_to_file(&config, result);
-    } else {
-        save_to_console(&config, &result);
-    }
+    let runtime = Builder::new()
+        .threaded_scheduler()
+        .core_threads(4)
+        .thread_name("my-custom-name")
+        .thread_stack_size(3 * 1024 * 1024)
+        .build()
+        .unwrap();
+    let num_of_threads = Semaphore::new(config.threads);
+    for host in hosts{
+        runtime.spawn(process_host(&host, &command, tx.clone(), num_of_threads));
+    };
+//    if config.output.save_to_file {
+//        save_to_file(&config, result);
+//    } else {
+//        save_to_console(&config, &result);
+//    }
     match config.output.keep_incremental_data {
         Some(true) => {}
         Some(false) => {
