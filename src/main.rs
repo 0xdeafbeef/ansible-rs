@@ -310,14 +310,9 @@ fn main() {
         .build()
         .unwrap();
     let num_of_threads = Arc::new(Semaphore::new(config.threads));
-    let tasks: Vec<_> = hosts.iter().map(|host| {
+    let tasks: Vec<_> = hosts.into_iter().map(|host| {
         reactor.spawn(process_host(host, command.clone(), tx.clone(), num_of_threads.clone()))
     }).collect();
-//    if config.output.save_to_file {
-//        save_to_file(&config, result);
-//    } else {
-//        save_to_console(&config, &result);
-//    }
     reactor.block_on(futures::future::join_all(tasks));
     match config.output.keep_incremental_data {
         Some(true) => {}
