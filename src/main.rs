@@ -16,7 +16,7 @@ use humantime::format_duration;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use rayon::prelude::*;
 use rayon::{spawn, ThreadPoolBuilder};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use ssh2::{Error, PublicKey, Session};
 
 #[derive(Serialize, Debug, Clone)]
@@ -33,8 +33,8 @@ fn construct_error<A>(
     e: String,
     tx: &SyncSender<Response>,
 ) -> Response
-where
-    A: Display + ToSocketAddrs,
+    where
+        A: Display + ToSocketAddrs,
 {
     let response = Response {
         result: e,
@@ -50,8 +50,8 @@ where
 }
 
 fn process_host<A>(hostname: A, command: &str, tx: SyncSender<Response>) -> Response
-where
-    A: ToSocketAddrs + Display,
+    where
+        A: ToSocketAddrs + Display,
 {
     let start_time = Instant::now();
     let tcp = match TcpStream::connect(&hostname) {
@@ -120,6 +120,7 @@ where
     response
 }
 
+
 fn hosts_builder(path: &Path) -> Vec<String> {
     let file = File::open(path).expect("Unable to open the file");
     let reader = BufReader::new(file);
@@ -131,10 +132,11 @@ fn hosts_builder(path: &Path) -> Vec<String> {
         .map(|l| l + ":22")
         .collect::<Vec<String>>()
 }
+
 #[cfg(debug_asserions)]
 fn process_host_test<A>(hostname: A, command: &str, tx: SyncSender<Response>) -> Response
-where
-    A: Display + ToSocketAddrs,
+    where
+        A: Display + ToSocketAddrs,
 {
     use rand::prelude::*;
     use std::thread::sleep;
@@ -261,6 +263,12 @@ fn save_to_console(conf: &Config, data: &Vec<Response>) {
     }
 }
 
+#[derive(Deserialize, Debug, Clone)]
+struct HostProps {
+    hostname: String,
+    commands: Option<Vec<String>>,
+}
+
 fn main() {
     color_backtrace::install();
     let args = App::new("SSH analyzer")
@@ -281,6 +289,15 @@ fn main() {
                 .takes_value(true),
         )
         .get_matches();
+    let mut rdr = csv::ReaderBuilder::new()
+        .delimiter(b';')
+        .has_headers(true)
+        .from_path(Path::new(&args.value_of("hosts").unwrap())).unwrap();
+    let mut  hosts :Vec<HostProps> = vec![];
+    for host in rdr.deserialize(){
+        hosts.push(host.unwrap());
+    };
+    hosts.iter().for_each(|x| println!("{:#?}", &x));
     let hosts = hosts_builder(Path::new(&args.value_of("hosts").unwrap()));
     let config = get_config(Path::new(&args.value_of("config").unwrap()));
     dbg!(&config);
