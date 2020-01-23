@@ -21,4 +21,6 @@ color-backtrace = "0.3.0"
 rand = "0.7.3"
 crossterm = "0.14"
 tui = { version = "0.8", default-features = false, features = ['crossterm'] }
-async-ssh2 = {git = "https://github.com/0xd34b33f/async-ssh2.git", branch = "master" }
+async-ssh2 = { version = "0.1", git = "https://github.com/spebern/async-ssh2.git" }
+num_cpus = "1.0"
+futures = "0.3.1"

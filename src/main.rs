@@ -5,7 +5,7 @@ use std::fs::File;
 use std::io::prelude::*;
 use std::io::{BufReader, Read};
 use std::path::Path;
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::time::UNIX_EPOCH;
 use std::time::{Duration, Instant};
@@ -20,7 +20,11 @@ use tokio::prelude::*;
 use std::thread::spawn;
 use std::net::{TcpStream, ToSocketAddrs};
 use tokio::runtime::Builder;
-use tokio::stream::*;
+use num_cpus::get;
+use futures::{
+    future::TryFutureExt,
+    try_join,
+};
 #[derive(Serialize, Debug, Clone)]
 struct Response {
     result: String,
@@ -35,8 +39,8 @@ fn construct_error<A>(
     e: String,
     tx: &SyncSender<Response>,
 ) -> Response
-where
-    A: Display + ToSocketAddrs,
+    where
+        A: Display + ToSocketAddrs,
 {
     let response = Response {
         result: e,
@@ -52,15 +56,15 @@ where
 }
 
 
-async fn process_host<A>(hostname: A, command: &str, tx: SyncSender<Response>, connection_pool:Semaphore) -> Response
-where
-    A: ToSocketAddrs + Display,
+async fn process_host<A>(hostname: A, command: Arc<String>, tx: SyncSender<Response>, connection_pool: Arc<Semaphore>) -> Response
+    where
+        A: ToSocketAddrs + Display,
 {
-    connection_pool.acquire().await;
+    let guard = connection_pool.acquire().await;
     let start_time = Instant::now();
     let tcp = match TcpStream::connect(&hostname)
         {
-            Ok(a)=>a,
+            Ok(a) => a,
             Err(e) => return construct_error(&hostname, start_time, e.to_string(), &tx)
         };
     let mut sess = match Session::new() {
@@ -69,17 +73,17 @@ where
     };
     const TIMEOUT: u32 = 6000;
     sess.set_timeout(TIMEOUT);
-   
-    if let Err(e)  =sess.set_tcp_stream(tcp){
+    if let Err(e) = sess.set_tcp_stream(tcp) {
         return construct_error(&hostname, start_time, e.to_string(), &tx);
     };
+    dbg!("Here");
     match sess.handshake().await {
         Ok(a) => a,
         Err(e) => {
             return construct_error(&hostname, start_time, e.to_string(), &tx);
         }
     };
-
+    dbg!("There");
     // Try to authenticate with the first identity in the agent.
     let mut agent = match sess.agent() {
         Ok(a) => a,
@@ -90,13 +94,13 @@ where
     match agent.connect().await {
         Ok(_) => (),
         Err(e) => {
-            return construct_error(&hostname, start_time, e.to_string(), &tx)
+            return construct_error(&hostname, start_time, e.to_string(), &tx);
         }
     };
-    if let Err(e)=  sess.userauth_agent("scan").await{
+    if let Err(e) = sess.userauth_agent("scan").await {
         return construct_error(&hostname, start_time, e.to_string(), &tx);
-    } ;
-    
+    };
+
 
     let mut channel = match sess.channel_session().await {
         Ok(a) => a,
@@ -104,8 +108,8 @@ where
             return construct_error(&hostname, start_time, e.to_string(), &tx);
         }
     };
-    if let Err(e) =   channel.exec(command).await{
-        return construct_error(&hostname, start_time, e.to_string(), &tx)
+    if let Err(e) = channel.exec(&command).await {
+        return construct_error(&hostname, start_time, e.to_string(), &tx);
     };
     let mut s = String::new();
     if let Err(e) = channel.read_to_string(&mut s).await {
@@ -133,10 +137,11 @@ fn hosts_builder(path: &Path) -> Vec<String> {
         .map(|l| l.unwrap() + ":22")
         .collect::<Vec<String>>()
 }
+
 #[cfg(debug_asserions)]
 fn process_host_test<A>(hostname: A, command: &str, tx: SyncSender<Response>) -> Response
-where
-    A: Display + ToSocketAddrs,
+    where
+        A: Display + ToSocketAddrs,
 {
     use rand::prelude::*;
     use std::thread::sleep;
@@ -264,13 +269,13 @@ fn save_to_console(conf: &Config, data: &Vec<Response>) {
 }
 
 fn main() {
-    color_backtrace::install();
+//    color_backtrace::install();
     let args = App::new("SSH analyzer")
         .arg(
             Arg::with_name("config")
                 .short("c")
                 .long("config")
-                .help("Path to hosts file")
+                .help("Path to config file")
                 .required(false)
                 .takes_value(true)
                 .default_value("config.toml"),
@@ -286,8 +291,7 @@ fn main() {
     let hosts = hosts_builder(Path::new(&args.value_of("hosts").unwrap()));
     let config = get_config(Path::new(&args.value_of("config").unwrap()));
     dbg!(&config);
-   
-    let command = &config.command;
+    let command =Arc::new( config.command.clone());
     let (tx, rx): (SyncSender<Response>, Receiver<Response>) = mpsc::sync_channel(0);
     let props = config.output.clone();
     let queue_len = hosts.len() as u64;
@@ -298,23 +302,23 @@ fn main() {
         .to_string();
     let incremental_name = format!("incremental_{}.json", &datetime);
     let inc_for_closure = incremental_name.clone();
-    spawn(move || incremental_save(rx, &props, queue_len, incremental_name.as_str()));
-    let runtime = Builder::new()
+    spawn(move ||incremental_save(rx, &props, queue_len, incremental_name.as_str()));
+    let mut reactor = Builder::new()
+        .enable_all()
         .threaded_scheduler()
-        .core_threads(4)
-        .thread_name("my-custom-name")
-        .thread_stack_size(3 * 1024 * 1024)
+        .core_threads(get())
         .build()
         .unwrap();
-    let num_of_threads = Semaphore::new(config.threads);
-    for host in hosts{
-        runtime.spawn(process_host(&host, &command, tx.clone(), num_of_threads));
-    };
+    let num_of_threads = Arc::new(Semaphore::new(config.threads));
+    let tasks: Vec<_> = hosts.iter().map(|host| {
+        reactor.spawn(process_host(host, command.clone(), tx.clone(), num_of_threads.clone()))
+    }).collect();
 //    if config.output.save_to_file {
 //        save_to_file(&config, result);
 //    } else {
 //        save_to_console(&config, &result);
 //    }
+    reactor.block_on(futures::future::join_all(tasks));
     match config.output.keep_incremental_data {
         Some(true) => {}
         Some(false) => {
@@ -350,8 +354,8 @@ fn incremental_save(rx: Receiver<Response>, props: &OutputProps, queue_len: u64,
             return;
         }
     };
-    dbg!("incremental_save started");
-    let total = progress_bar_creator(queue_len);
+//    let total = progress_bar_creator(queue_len);
+    let total = ProgressBar::hidden();
     let mut ok = 0;
     let mut ko = 0;
     file.write_all(b"[\r\n")
@@ -378,4 +382,5 @@ fn incremental_save(rx: Receiver<Response>, props: &OutputProps, queue_len: u64,
     }
     file.write_all(b"\n]")
         .expect("Writing for incremental saving failed");
+    dbg!("Exited inc");
 }
