@@ -39,6 +39,7 @@ fn construct_error<A>(
     where
         A: Display + ToSocketAddrs,
 {
+    dbg!("Constructing error");
     let response = Response {
         result: e,
         hostname: hostname.to_string(),
@@ -142,8 +143,8 @@ fn hosts_builder(path: &Path) -> Vec<String> {
         .collect::<Vec<String>>()
 }
 
-#[cfg(debug_asserions)]
-fn process_host_test<A>(hostname: A, command: &str, tx: SyncSender<Response>) -> Response
+//#[cfg(debug_asserions)]
+async fn process_host_test<A>(hostname: A, command: Arc<String>, tx: SyncSender<Response>, connection_pool: Arc<Semaphore>) -> Response
     where
         A: Display + ToSocketAddrs,
 {
@@ -153,7 +154,9 @@ fn process_host_test<A>(hostname: A, command: &str, tx: SyncSender<Response>) ->
     let mut rng = rand::rngs::OsRng;
     let stat: bool = rng.gen();
     let wait_time = rng.gen_range(2, 15);
-    sleep(Duration::from_secs(wait_time));
+    let guard = connection_pool.acquire().await;
+    tokio::time::delay_for(Duration::from_secs(wait_time)).await;
+    println!("Processing {}", &hostname);
     if !stat {
         return construct_error(
             &hostname,
@@ -173,6 +176,7 @@ fn process_host_test<A>(hostname: A, command: &str, tx: SyncSender<Response>) ->
         Ok(_) => (),
         Err(e) => eprintln!("Error sending data via channel: {}", e),
     };
+    println!("Finished processing {}", &hostname);
     response
 }
 
@@ -315,7 +319,7 @@ fn main() {
         .unwrap();
     let num_of_threads = Arc::new(Semaphore::new(config.threads));
     let tasks: Vec<_> = hosts.into_iter().map(|host| {
-        reactor.spawn(process_host(host, command.clone(), tx.clone(), num_of_threads.clone()))
+        reactor.spawn(process_host_test(host, command.clone(), tx.clone(), num_of_threads.clone()))
     }).collect();
     reactor.block_on(futures::future::join_all(tasks));
     match config.output.keep_incremental_data {
