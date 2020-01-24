@@ -21,10 +21,7 @@ use std::thread::spawn;
 use std::net::{TcpStream, ToSocketAddrs};
 use tokio::runtime::Builder;
 use num_cpus::get;
-use futures::{
-    future::TryFutureExt,
-    try_join,
-};
+
 #[derive(Serialize, Debug, Clone)]
 struct Response {
     result: String,
@@ -67,23 +64,30 @@ async fn process_host<A>(hostname: A, command: Arc<String>, tx: SyncSender<Respo
             Ok(a) => a,
             Err(e) => return construct_error(&hostname, start_time, e.to_string(), &tx)
         };
+    dbg!(format!("Tcp connection intialized {}", &hostname));
     let mut sess = match Session::new() {
         Ok(a) => a,
         Err(e) => return construct_error(&hostname, start_time, e.to_string(), &tx),
     };
     const TIMEOUT: u32 = 6000;
     sess.set_timeout(TIMEOUT);
+    dbg!(format!("Session is built {}", &hostname));
     if let Err(e) = sess.set_tcp_stream(tcp) {
         return construct_error(&hostname, start_time, e.to_string(), &tx);
     };
-    dbg!("Here");
+    dbg!(format!("Tcp stream is set : {}", &hostname));
+
     match sess.handshake().await {
-        Ok(a) => a,
+        Ok(a) => {
+            dbg!(format!("Handshake is done: {}", &hostname));
+            a
+        }
         Err(e) => {
+            dbg!("Handhaske is failed");
             return construct_error(&hostname, start_time, e.to_string(), &tx);
         }
     };
-    dbg!("There");
+    dbg!(format!("Handshake is done: {}", &hostname));
     // Try to authenticate with the first identity in the agent.
     let mut agent = match sess.agent() {
         Ok(a) => a,
@@ -291,7 +295,7 @@ fn main() {
     let hosts = hosts_builder(Path::new(&args.value_of("hosts").unwrap()));
     let config = get_config(Path::new(&args.value_of("config").unwrap()));
     dbg!(&config);
-    let command =Arc::new( config.command.clone());
+    let command = Arc::new(config.command.clone());
     let (tx, rx): (SyncSender<Response>, Receiver<Response>) = mpsc::sync_channel(0);
     let props = config.output.clone();
     let queue_len = hosts.len() as u64;
@@ -302,7 +306,7 @@ fn main() {
         .to_string();
     let incremental_name = format!("incremental_{}.json", &datetime);
     let inc_for_closure = incremental_name.clone();
-    spawn(move ||incremental_save(rx, &props, queue_len, incremental_name.as_str()));
+    spawn(move || incremental_save(rx, &props, queue_len, incremental_name.as_str()));
     let mut reactor = Builder::new()
         .enable_all()
         .threaded_scheduler()
