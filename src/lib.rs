@@ -7,26 +7,24 @@ use std::io::{BufReader, Read};
 use std::path::Path;
 use std::sync::{mpsc, Arc};
 use std::sync::mpsc::{Receiver, SyncSender};
-use std::time::UNIX_EPOCH;
-use std::time::{Duration, Instant};
-use color_backtrace;
+use std::time::{Instant};
 use humantime::format_duration;
-use indicatif::{ProgressBar, ProgressStyle};
-use serde::{Deserialize, Serialize};
+use serde::{Serialize};
 use async_ssh2::{Error, PublicKey, Session};
 use tokio::sync::Semaphore;
 use tokio::prelude::*;
 use std::net::{TcpStream, ToSocketAddrs};
 use tokio::runtime::{Builder, Runtime};
-use num_cpus::get;
+
 
 #[derive(Serialize, Debug, Clone)]
-struct Response {
+pub struct Response {
 	result: String,
 	hostname: String,
 	process_time: String,
 	status: bool,
 }
+
 async fn process_host<A>(hostname: A, command: Arc<String>, tx: SyncSender<Response>, connection_pool: Arc<Semaphore>) -> Response
 	where
 		A: ToSocketAddrs + Display,
@@ -129,15 +127,27 @@ fn construct_error<A>(
 	response
 }
 
-struct ParallelSshProps {
+pub struct ParallelSshProps {
 	maximum_connections:usize,
 	cores_to_use: usize,
 	 reactor: Runtime,
 	
 }
-
+impl Default for ParallelSshProps{
+	fn default() -> Self {
+		ParallelSshProps {
+			maximum_connections: 1,
+			cores_to_use: 1,
+			reactor: Builder::new()
+				.enable_all()
+				.core_threads(1)
+				.build()
+				.expect("Error building tokio runtime")
+		}
+	}
+}
 impl ParallelSshProps{
-	fn new(mut self, cores_to_use: usize, max_connections: usize) ->ParallelSshProps{
+	pub fn new(mut self, cores_to_use: usize, max_connections: usize) ->ParallelSshProps{
 		self.cores_to_use = cores_to_use;
 		self.maximum_connections = max_connections;
 		self.reactor = match Builder::new()
@@ -151,7 +161,7 @@ impl ParallelSshProps{
 			};
 		self
 	}
-	fn parallel_ssh_process<A>(mut self, hosts:Vec<A>, command:&str) -> Receiver<Response>
+	pub fn parallel_ssh_process<A>(mut self, hosts:Vec<A>, command:&str) -> Receiver<Response>
 		where A: Display + ToSocketAddrs
 	{
 		let num_of_threads = Arc::new(Semaphore::new(self.maximum_connections));
