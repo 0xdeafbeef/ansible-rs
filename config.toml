@@ -1,0 +1,10 @@
+threads = 2000
+timeout = 60
+command = """
+uptime
+"""
+[output]
+save_to_file = true
+filename = "output.json"
+pretty_format = true
+show_progress = true
