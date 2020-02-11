@@ -265,7 +265,8 @@ fn generate_kv_hosts_from_csv(path: &str) -> Result<BTreeMap<String, String>, st
 
 fn main() {
     color_backtrace::install();
-    let args = App::new("SSH analyzer")
+    let args = App::new("ansible-rs")
+        .version("1.0")
         .arg(
             Arg::with_name("config")
                 .short("c")
