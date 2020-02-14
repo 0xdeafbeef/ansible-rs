@@ -5,7 +5,7 @@ use std::fs::File;
 use std::io::prelude::*;
 use std::io::{BufReader, Read};
 use std::net::{TcpStream, ToSocketAddrs};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::time::UNIX_EPOCH;
@@ -113,7 +113,6 @@ fn hosts_builder(path: &Path) -> Vec<String> {
         .map(|l| l.unwrap_or("Error reading line".to_string()))
         .map(|l| l.replace("\"", ""))
         .map(|l| l.replace("'", ""))
-        .map(|l| l + ":22")
         .collect::<Vec<String>>()
 }
 
@@ -163,7 +162,7 @@ struct OutputProps {
 #[derive(Deserialize, Debug, Clone)]
 struct Config {
     threads: usize,
-    agent_parallism: isize,
+    agent_parallelism: isize,
     output: OutputProps,
     command: String,
     timeout: u32,
@@ -185,7 +184,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             threads: 10,
-            agent_parallism: 1,
+            agent_parallelism: 1,
             command: String::default(),
             output: OutputProps::default(),
             timeout: 60,
@@ -251,7 +250,6 @@ fn save_to_console(conf: &Config, data: &Vec<Response>) {
 
 fn generate_kv_hosts_from_csv(path: &str) -> Result<BTreeMap<String, String>, std::io::Error>
 {
-//     let f = File::open(Path::new(path))?;
     let mut rd = csv::ReaderBuilder::new().from_path(Path::new(path))?;
     let mut map = BTreeMap::new();
     for res in rd.records() {
@@ -266,7 +264,7 @@ fn generate_kv_hosts_from_csv(path: &str) -> Result<BTreeMap<String, String>, st
 fn main() {
     color_backtrace::install();
     let args = App::new("ansible-rs")
-        .version("1.0")
+        .version("1.1.1")
         .arg(
             Arg::with_name("config")
                 .short("c")
@@ -316,10 +314,10 @@ fn main() {
         .unwrap()
         .as_secs()
         .to_string();
-    let incremental_name = format!("incremental_{}.json", &datetime);
+    let incremental_name = format!("incremental_{}", &datetime);
     let inc_for_closure = incremental_name.clone();
     spawn(move || incremental_save(rx, &props, queue_len, incremental_name.as_str()));
-    let agent_parallelism = Arc::new(Semaphore::new(config.agent_parallism));
+    let agent_parallelism = Arc::new(Semaphore::new(config.agent_parallelism));
     let timeout = config.timeout * 1000;
     let result: Vec<Response> = hosts
         .par_iter()
@@ -358,14 +356,17 @@ fn progress_bar_creator(queue_len: u64) -> ProgressBar {
 }
 
 fn incremental_save(rx: Receiver<Response>, props: &OutputProps, queue_len: u64, filename: &str) {
-    let mut file = match File::create(Path::new(filename)) {
+    let incremental_name = PathBuf::from(filename.to_string() + ".json");
+    let mut file = match File::create(incremental_name) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("incremental salving failed. : {}", e);
             return;
         }
     };
-    let mut failed_processing_due_to_our_side_error = match File::create(Path::new(&("failed_hosts_".to_string() + filename))) {
+    let incremental_hosts_name = PathBuf::from("failed_hosts_".to_string() + filename);
+
+    let mut failed_processing_due_to_our_side_error = match File::create(&incremental_hosts_name) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("incremental salving failed. : {}", e);
@@ -391,19 +392,13 @@ fn incremental_save(rx: Receiver<Response>, props: &OutputProps, queue_len: u64,
             ko += 1
         };
         if !received.status {
-            let  hostname = received.hostname.split(':').collect::<Vec<&str>>()[0];
-            match received.result.as_str() {
-                "[-42] failed connecting agent" => {
+            let hostname = received.hostname.split(':').collect::<Vec<&str>>()[0];
+            let error_string = received.result.as_str();
+            if   error_string.contains("[-42]") || error_string.contains("[-19]")  {
+
                     failed_processing_due_to_our_side_error.write_all(&hostname.as_bytes()).expect("Error writing for inc save");
                     failed_processing_due_to_our_side_error.write_all(b"\n").expect("Error writing for inc save");
                     continue;
-                }
-                "[-19] Callback returned error" => {
-                    failed_processing_due_to_our_side_error.write_all(&hostname.as_bytes()).expect("Error writing for inc save");
-                    failed_processing_due_to_our_side_error.write_all(b"\n").expect("Error writing for inc save");
-                    continue;
-                }
-                _ => ()
             }
         };
         total.inc(1);
@@ -415,4 +410,9 @@ fn incremental_save(rx: Receiver<Response>, props: &OutputProps, queue_len: u64,
     }
     file.write_all(b"\n]")
         .expect("Writing for incremental saving failed");
+    if fs::metadata(&incremental_hosts_name).expect("Error removing temp file").len() ==0 {
+        if let Err(e) = fs::remove_file(incremental_hosts_name) {
+            eprintln!("Error removing temp file");
+        }
+    }
 }
