@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::time::UNIX_EPOCH;
-use std::time::{Duration, Instant};
+use std::time::{Instant};
 
 use color_backtrace;
 use humantime::format_duration;
@@ -19,7 +19,6 @@ use rayon::{spawn, ThreadPoolBuilder};
 use serde::{Deserialize, Serialize};
 use ssh2::Session;
 use std_semaphore::Semaphore;
-use std::thread::sleep;
 use std::collections::BTreeMap;
 
 #[derive(Serialize, Debug, Clone)]
