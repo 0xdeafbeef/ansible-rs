@@ -252,7 +252,10 @@ fn generate_kv_hosts_from_csv(path: &str) -> Result<BTreeMap<String, String>, st
     let mut rd = csv::ReaderBuilder::new().from_path(Path::new(path))?;
     let mut map = BTreeMap::new();
     for res in rd.records() {
-        let rec = res.unwrap();
+         let rec = match res{
+             Ok(a)=>a,
+             Err(_)=>continue
+         };
         let k = rec.get(0).unwrap();
         let v = rec.get(1).unwrap();
         map.insert(k.to_string(), v.to_string());
@@ -263,7 +266,7 @@ fn generate_kv_hosts_from_csv(path: &str) -> Result<BTreeMap<String, String>, st
 fn main() {
     color_backtrace::install();
     let args = App::new("ansible-rs")
-        .version("1.1.1")
+        .version(crate_version!())
         .arg(
             Arg::with_name("config")
                 .short("c")

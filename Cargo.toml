@@ -1,6 +1,6 @@
 [package]
 name = "ansible-rs"
-version = "0.1.0"
+version = "1.1.2"
 authors = ["0xd34db33f <0xd34db33f@noreply.github.com>"]
 edition = "2018"
 
