@@ -1,4 +1,5 @@
 use clap::{App, Arg};
+use clap::crate_version;
 use std::fmt::Display;
 use std::fs;
 use std::fs::File;
