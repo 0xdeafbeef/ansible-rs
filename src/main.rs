@@ -5,7 +5,7 @@ use std::fs;
 use std::fs::File;
 use std::io::prelude::*;
 use std::io::{BufReader, Read};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{TcpStream, ToSocketAddrs, SocketAddrV4, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
 use std::sync::mpsc::{Receiver, SyncSender};
@@ -52,11 +52,10 @@ fn construct_error<A>(
     response
 }
 
-fn process_host<A>(hostname: A, command: &str, tx: SyncSender<Response>, agent_lock: Arc<Semaphore>, timeout: u32) -> Response
-    where
-        A: ToSocketAddrs + Display,
+fn process_host(host_ip: Ipv4Addr,  command: &str, tx: SyncSender<Response>, agent_lock: Arc<Semaphore>, timeout: u32) -> Response
 {
     let start_time = Instant::now();
+    let hostname = SocketAddrV4::new(host_ip, 22);
     let tcp = match TcpStream::connect(&hostname) {
         Ok(a) => a,
         Err(e) => return construct_error(&hostname, start_time, e.to_string(), &tx),
@@ -105,7 +104,7 @@ fn process_host<A>(hostname: A, command: &str, tx: SyncSender<Response>, agent_l
     response
 }
 
-fn hosts_builder(path: &Path) -> Vec<String> {
+fn hosts_builder(path: &Path) -> Vec<Ipv4Addr> {
     let file = File::open(path).expect("Unable to open the file");
     let reader = BufReader::new(file);
     reader
@@ -113,7 +112,9 @@ fn hosts_builder(path: &Path) -> Vec<String> {
         .map(|l| l.unwrap_or("Error reading line".to_string()))
         .map(|l| l.replace("\"", ""))
         .map(|l| l.replace("'", ""))
-        .collect::<Vec<String>>()
+        .map(|l|l.parse())
+        .filter_map(Result::ok)
+        .collect()
 }
 
 #[cfg(debug_asserions)]
@@ -248,7 +249,7 @@ fn save_to_console(conf: &Config, data: &Vec<Response>) {
     }
 }
 
-fn generate_kv_hosts_from_csv(path: &str) -> Result<BTreeMap<String, String>, std::io::Error>
+fn generate_kv_hosts_from_csv(path: &str) -> Result<BTreeMap<Ipv4Addr, String>, std::io::Error>
 {
     let mut rd = csv::ReaderBuilder::new().from_path(Path::new(path))?;
     let mut map = BTreeMap::new();
@@ -257,9 +258,13 @@ fn generate_kv_hosts_from_csv(path: &str) -> Result<BTreeMap<String, String>, st
              Ok(a)=>a,
              Err(_)=>continue
          };
-        let k = rec.get(0).unwrap();
+        let k:Ipv4Addr = match  rec.get(0).unwrap().parse(){
+          Ok(a)=>a,
+            Err(_)=>continue
+        };
         let v = rec.get(1).unwrap();
-        map.insert(k.to_string(), v.to_string());
+        println!("{} {}", &k, &v);
+        map.insert(k, v.to_string());
     }
     Ok(map)
 }
@@ -324,7 +329,8 @@ fn main() {
     let timeout = config.timeout * 1000;
     let result: Vec<Response> = hosts
         .par_iter()
-        .map(|data| process_host(data.0.to_string() + ":22", data.1, tx.clone(), agent_parallelism.clone(), timeout))
+        .inspect(|x| println!("{:#?}", x))
+        .map(|data| process_host(*data.0, data.1, tx.clone(), agent_parallelism.clone(), timeout))
         .collect();
     if config.output.save_to_file {
         save_to_file(&config, result);
