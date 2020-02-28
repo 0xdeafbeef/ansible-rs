@@ -1,26 +1,28 @@
-use clap::{App, Arg};
-use clap::crate_version;
+use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::fs;
 use std::fs::File;
-use std::io::prelude::*;
 use std::io::{BufReader, Read};
-use std::net::{TcpStream, ToSocketAddrs, SocketAddrV4, Ipv4Addr};
+use std::io::prelude::*;
+use std::net::{Ipv4Addr, SocketAddrV4, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use std::sync::mpsc::{Receiver, SyncSender};
-use std::time::UNIX_EPOCH;
-use std::time::{Instant};
+use std::thread::spawn;
 
+use std::time::Instant;
+
+use chrono::Utc;
+use clap::{App, Arg};
+use clap::crate_version;
 use color_backtrace;
 use humantime::format_duration;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
-use rayon::{spawn, ThreadPoolBuilder};
+use rayon::ThreadPoolBuilder;
 use serde::{Deserialize, Serialize};
 use ssh2::Session;
 use std_semaphore::Semaphore;
-use std::collections::BTreeMap;
 
 #[derive(Serialize, Debug, Clone)]
 struct Response {
@@ -36,8 +38,8 @@ fn construct_error<A>(
     e: String,
     tx: &SyncSender<Response>,
 ) -> Response
-    where
-        A: Display + ToSocketAddrs,
+where
+    A: Display + ToSocketAddrs,
 {
     let response = Response {
         result: e,
@@ -52,8 +54,13 @@ fn construct_error<A>(
     response
 }
 
-fn process_host(host_ip: Ipv4Addr,  command: &str, tx: SyncSender<Response>, agent_lock: Arc<Semaphore>, timeout: u32) -> Response
-{
+fn process_host(
+    host_ip: Ipv4Addr,
+    command: &str,
+    tx: SyncSender<Response>,
+    agent_lock: Arc<Semaphore>,
+    timeout: u32,
+) -> Response {
     let start_time = Instant::now();
     let hostname = SocketAddrV4::new(host_ip, 22);
     let tcp = match TcpStream::connect(&hostname) {
@@ -76,7 +83,9 @@ fn process_host(host_ip: Ipv4Addr,  command: &str, tx: SyncSender<Response>, age
     // Try to authenticate with the first identity in the agent.
     match sess.userauth_agent("scan") {
         Ok(_) => (),
-        Err(e) => { return construct_error(&hostname, start_time, e.to_string(), &tx); }
+        Err(e) => {
+            return construct_error(&hostname, start_time, e.to_string(), &tx);
+        }
     };
     drop(guard);
     let mut channel = match sess.channel_session() {
@@ -112,15 +121,15 @@ fn hosts_builder(path: &Path) -> Vec<Ipv4Addr> {
         .map(|l| l.unwrap_or("Error reading line".to_string()))
         .map(|l| l.replace("\"", ""))
         .map(|l| l.replace("'", ""))
-        .map(|l|l.parse())
+        .map(|l| l.parse())
         .filter_map(Result::ok)
         .collect()
 }
 
 #[cfg(debug_asserions)]
 fn process_host_test<A>(hostname: A, command: &str, tx: SyncSender<Response>) -> Response
-    where
-        A: Display + ToSocketAddrs,
+where
+    A: Display + ToSocketAddrs,
 {
     use rand::prelude::*;
     use std::thread::sleep;
@@ -249,18 +258,17 @@ fn save_to_console(conf: &Config, data: &Vec<Response>) {
     }
 }
 
-fn generate_kv_hosts_from_csv(path: &str) -> Result<BTreeMap<Ipv4Addr, String>, std::io::Error>
-{
+fn generate_kv_hosts_from_csv(path: &str) -> Result<BTreeMap<Ipv4Addr, String>, std::io::Error> {
     let mut rd = csv::ReaderBuilder::new().from_path(Path::new(path))?;
     let mut map = BTreeMap::new();
     for res in rd.records() {
-         let rec = match res{
-             Ok(a)=>a,
-             Err(_)=>continue
-         };
-        let k:Ipv4Addr = match  rec.get(0).unwrap().parse(){
-          Ok(a)=>a,
-            Err(_)=>continue
+        let rec = match res {
+            Ok(a) => a,
+            Err(_) => continue,
+        };
+        let k: Ipv4Addr = match rec.get(0).unwrap().parse() {
+            Ok(a) => a,
+            Err(_) => continue,
         };
         let v = rec.get(1).unwrap();
         println!("{} {}", &k, &v);
@@ -289,13 +297,15 @@ fn main() {
                 .required(true)
                 .takes_value(true),
         )
-        .arg(Arg::with_name("hosts_format")
-            .short("f")
-            .long("format")
-            .takes_value(true)
-            .help("Hosts format")
-            .long_help("Hosts format: csv for key value and empty(default) for list")
-            .default_value(""))
+        .arg(
+            Arg::with_name("hosts_format")
+                .short("f")
+                .long("format")
+                .takes_value(true)
+                .help("Hosts format")
+                .long_help("Hosts format: csv for key value and empty(default) for list")
+                .default_value(""),
+        )
         .get_matches();
     let config = get_config(Path::new(&args.value_of("config").unwrap()));
     let command = &config.command;
@@ -306,7 +316,7 @@ fn main() {
         let mut map = BTreeMap::new();
         for h in hosts_builder(Path::new(&args.value_of("hosts").unwrap())) {
             map.insert(h, command.clone());
-        };
+        }
         map
     };
     dbg!(&config);
@@ -317,21 +327,28 @@ fn main() {
     let (tx, rx): (SyncSender<Response>, Receiver<Response>) = mpsc::sync_channel(0);
     let props = config.output.clone();
     let queue_len = hosts.len() as u64;
-    let datetime = std::time::SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        .to_string();
-    let incremental_name = format!("incremental_{}", &datetime);
+    let datetime = Utc::now().format("%H_%M_%S").to_string();
+    let incremental_name = format!("{}", &datetime);
     let inc_for_closure = incremental_name.clone();
-    spawn(move || incremental_save(rx, &props, queue_len, incremental_name.as_str()));
+    let incremental_save_handle =
+        spawn(move || incremental_save(rx, &props, queue_len, incremental_name.as_str()));
     let agent_parallelism = Arc::new(Semaphore::new(config.agent_parallelism));
     let timeout = config.timeout * 1000;
     let result: Vec<Response> = hosts
         .par_iter()
-        .inspect(|x| println!("{:#?}", x))
-        .map(|data| process_host(*data.0, data.1, tx.clone(), agent_parallelism.clone(), timeout))
+        .map(|data| {
+            process_host(
+                *data.0,
+                data.1,
+                tx.clone(),
+                agent_parallelism.clone(),
+                timeout,
+            )
+        })
         .collect();
+    incremental_save_handle
+        .join()
+        .expect("Error joining threads");
     if config.output.save_to_file {
         save_to_file(&config, result);
     } else {
@@ -365,7 +382,14 @@ fn progress_bar_creator(queue_len: u64) -> ProgressBar {
 }
 
 fn incremental_save(rx: Receiver<Response>, props: &OutputProps, queue_len: u64, filename: &str) {
-    let incremental_name = PathBuf::from(filename.to_string() + ".json");
+    dbg!(queue_len);
+    let store_dir_date = Utc::today().format("%d_%B_%Y").to_string();
+    if !Path::new(&store_dir_date).exists() {
+        std::fs::create_dir(Path::new(&store_dir_date))
+            .expect("Failed creating dir for temporary save");
+    }
+    let incremental_name =
+        PathBuf::from(store_dir_date.clone() + "/incremental_" + &filename + ".json");
     let mut file = match File::create(incremental_name) {
         Ok(a) => a,
         Err(e) => {
@@ -373,7 +397,8 @@ fn incremental_save(rx: Receiver<Response>, props: &OutputProps, queue_len: u64,
             return;
         }
     };
-    let incremental_hosts_name = PathBuf::from("failed_hosts_".to_string() + filename);
+    let incremental_hosts_name =
+        PathBuf::from(store_dir_date + &"/failed_hosts_".to_string() + filename + ".txt");
 
     let mut failed_processing_due_to_our_side_error = match File::create(&incremental_hosts_name) {
         Ok(a) => a,
@@ -387,7 +412,8 @@ fn incremental_save(rx: Receiver<Response>, props: &OutputProps, queue_len: u64,
     let mut ko = 0;
     file.write_all(b"[\r\n")
         .expect("Writing for incremental saving failed");
-    for _ in 0..=queue_len {
+    for _ in 0..=queue_len - 1 {
+        println!("loop");
         let received = match rx.recv() {
             Ok(a) => a,
             Err(e) => {
@@ -403,11 +429,14 @@ fn incremental_save(rx: Receiver<Response>, props: &OutputProps, queue_len: u64,
         if !received.status {
             let hostname = received.hostname.split(':').collect::<Vec<&str>>()[0];
             let error_string = received.result.as_str();
-            if   error_string.contains("[-42]") || error_string.contains("[-19]")  {
-
-                    failed_processing_due_to_our_side_error.write_all(&hostname.as_bytes()).expect("Error writing for inc save");
-                    failed_processing_due_to_our_side_error.write_all(b"\n").expect("Error writing for inc save");
-                    continue;
+            if error_string.contains("[-42]") || error_string.contains("[-19]") {
+                failed_processing_due_to_our_side_error
+                    .write_all(&hostname.as_bytes())
+                    .expect("Error writing for inc save");
+                failed_processing_due_to_our_side_error
+                    .write_all(b"\n")
+                    .expect("Error writing for inc save");
+                continue;
             }
         };
         total.inc(1);
@@ -419,9 +448,14 @@ fn incremental_save(rx: Receiver<Response>, props: &OutputProps, queue_len: u64,
     }
     file.write_all(b"\n]")
         .expect("Writing for incremental saving failed");
-    if fs::metadata(&incremental_hosts_name).expect("Error removing temp file").len() ==0 {
+    dbg!(&incremental_hosts_name);
+    if fs::metadata(&incremental_hosts_name)
+        .expect("Error removing temp file")
+        .len()
+        == 0
+    {
         if let Err(e) = fs::remove_file(incremental_hosts_name) {
-            eprintln!("Error removing temp file");
+            eprintln!("Error removing temp file: {}", e);
         }
     }
 }
