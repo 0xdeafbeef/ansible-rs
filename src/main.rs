@@ -1,26 +1,19 @@
 use std::collections::BTreeMap;
-use std::fs;
-use std::fs::File;
-use std::io::prelude::*;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, mpsc};
 use std::sync::mpsc::{Receiver, SyncSender};
+use std::sync::{mpsc, Arc};
 use std::thread::spawn;
 mod misc;
-use misc::*;
 use chrono::Utc;
-use clap::{App, Arg};
 use clap::crate_version;
+use clap::{App, Arg};
 use color_backtrace;
-use indicatif::{ProgressBar, ProgressStyle};
+use misc::*;
 use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 use std_semaphore::Semaphore;
 mod host_processing;
 use host_processing::*;
-
-
-
 
 fn main() {
     color_backtrace::install();
@@ -116,89 +109,3 @@ fn main() {
     };
 }
 
-fn progress_bar_creator(queue_len: u64) -> ProgressBar {
-    let total_hosts_processed = ProgressBar::new(queue_len);
-    let total_style = ProgressStyle::default_bar()
-        .template("{eta_precise} {wide_bar} Hosts processed: {pos}/{len} Speed: {per_sec} {msg}")
-        .progress_chars("##-");
-    total_hosts_processed.set_style(total_style);
-
-    total_hosts_processed
-}
-
-fn incremental_save(rx: Receiver<Response>, props: &OutputProps, queue_len: u64, filename: &str) {
-    let store_dir_date = Utc::today().format("%d_%B_%Y").to_string();
-    if !Path::new(&store_dir_date).exists() {
-        std::fs::create_dir(Path::new(&store_dir_date))
-            .expect("Failed creating dir for temporary save");
-    }
-    let incremental_name =
-        PathBuf::from(store_dir_date.clone() + "/incremental_" + &filename + ".json");
-    let mut file = match File::create(incremental_name) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("incremental salving failed. : {}", e);
-            return;
-        }
-    };
-    let incremental_hosts_name =
-        PathBuf::from(store_dir_date + &"/failed_hosts_".to_string() + filename + ".txt");
-
-    let mut failed_processing_due_to_our_side_error = match File::create(&incremental_hosts_name) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("incremental salving failed. : {}", e);
-            return;
-        }
-    };
-    let total = progress_bar_creator(queue_len);
-    let mut ok = 0;
-    let mut ko = 0;
-    file.write_all(b"[\r\n")
-        .expect("Writing for incremental saving failed");
-    for _ in 0..=queue_len - 1 {
-        let received = match rx.recv() {
-            Ok(a) => a,
-            Err(e) => {
-                eprintln!("incremental_save: {}", e);
-                break;
-            }
-        };
-        if received.status {
-            ok += 1
-        } else {
-            ko += 1
-        };
-        if !received.status {
-            let hostname = received.hostname.split(':').collect::<Vec<&str>>()[0];
-            let error_string = received.result.as_str();
-            if error_string.contains("[-42]") || error_string.contains("[-19]") {
-                failed_processing_due_to_our_side_error
-                    .write_all(&hostname.as_bytes())
-                    .expect("Error writing for inc save");
-                failed_processing_due_to_our_side_error
-                    .write_all(b"\n")
-                    .expect("Error writing for inc save");
-                continue;
-            }
-        };
-        total.inc(1);
-        total.set_message(&format!("OK: {}, Failed: {}", ok, ko));
-        let mut data = serde_json::to_string_pretty(&received).unwrap();
-        data += ",\n";
-        file.write_all(data.as_bytes())
-            .expect("Writing for incremental saving failed");
-    }
-    file.write_all(b"\n]")
-        .expect("Writing for incremental saving failed");
-    dbg!(&incremental_hosts_name);
-    if fs::metadata(&incremental_hosts_name)
-        .expect("Error removing temp file")
-        .len()
-        == 0
-    {
-        if let Err(e) = fs::remove_file(incremental_hosts_name) {
-            eprintln!("Error removing temp file: {}", e);
-        }
-    }
-}

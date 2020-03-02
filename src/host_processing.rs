@@ -1,13 +1,13 @@
-use std::time::Instant;
-use std::sync::mpsc::SyncSender;
 use crate::misc::Response;
-use std::fmt::Display;
-use std::net::{ToSocketAddrs, Ipv4Addr, SocketAddrV4, TcpStream};
 use humantime::format_duration;
-use std_semaphore::Semaphore;
-use std::sync::Arc;
 use ssh2::Session;
+use std::fmt::Display;
 use std::io::Read;
+use std::net::{Ipv4Addr, SocketAddrV4, TcpStream, ToSocketAddrs};
+use std::sync::mpsc::SyncSender;
+use std::sync::Arc;
+use std::time::Instant;
+use std_semaphore::Semaphore;
 
 pub fn construct_error<A>(
     hostname: &A,
@@ -15,8 +15,8 @@ pub fn construct_error<A>(
     e: String,
     tx: &SyncSender<Response>,
 ) -> Response
-    where
-        A: Display + ToSocketAddrs,
+where
+    A: Display + ToSocketAddrs,
 {
     let response = Response {
         result: e,
