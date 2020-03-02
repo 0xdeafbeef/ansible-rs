@@ -2,16 +2,16 @@ use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::fs;
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::{Read};
 use std::io::prelude::*;
 use std::net::{Ipv4Addr, SocketAddrV4, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::thread::spawn;
-
 use std::time::Instant;
-
+mod misc;
+use misc::*;
 use chrono::Utc;
 use clap::{App, Arg};
 use clap::crate_version;
@@ -20,17 +20,9 @@ use humantime::format_duration;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
-use serde::{Deserialize, Serialize};
 use ssh2::Session;
 use std_semaphore::Semaphore;
 
-#[derive(Serialize, Debug, Clone)]
-struct Response {
-    result: String,
-    hostname: String,
-    process_time: String,
-    status: bool,
-}
 
 fn construct_error<A>(
     hostname: &A,
@@ -113,169 +105,7 @@ fn process_host(
     response
 }
 
-fn hosts_builder(path: &Path) -> Vec<Ipv4Addr> {
-    let file = File::open(path).expect("Unable to open the file");
-    let reader = BufReader::new(file);
-    reader
-        .lines()
-        .map(|l| l.unwrap_or("Error reading line".to_string()))
-        .map(|l| l.replace("\"", ""))
-        .map(|l| l.replace("'", ""))
-        .map(|l| l.parse())
-        .filter_map(Result::ok)
-        .collect()
-}
 
-#[cfg(debug_asserions)]
-fn process_host_test<A>(hostname: A, command: &str, tx: SyncSender<Response>) -> Response
-where
-    A: Display + ToSocketAddrs,
-{
-    use rand::prelude::*;
-    use std::thread::sleep;
-    let start_time = Instant::now();
-    let mut rng = rand::rngs::OsRng;
-    let stat: bool = rng.gen();
-    let wait_time = rng.gen_range(2, 15);
-    sleep(Duration::from_secs(wait_time));
-    if !stat {
-        return construct_error(
-            &hostname,
-            start_time,
-            "Proizoshel trolling".to_string(),
-            &tx,
-        );
-    }
-    let end_time = Instant::now();
-    let response = Response {
-        hostname: hostname.to_string(),
-        result: "test".to_string(),
-        process_time: format_duration(end_time - start_time).to_string(),
-        status: true,
-    };
-    match tx.send(response.clone()) {
-        Ok(_) => (),
-        Err(e) => eprintln!("Error sending data via channel: {}", e),
-    };
-    response
-}
-
-#[derive(Deserialize, Debug, Clone)]
-struct OutputProps {
-    save_to_file: bool,
-    filename: Option<String>,
-    pretty_format: bool,
-    show_progress: bool,
-    keep_incremental_data: Option<bool>,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-struct Config {
-    threads: usize,
-    agent_parallelism: isize,
-    output: OutputProps,
-    command: String,
-    timeout: u32,
-}
-
-impl Default for OutputProps {
-    fn default() -> Self {
-        OutputProps {
-            save_to_file: false,
-            filename: None,
-            pretty_format: false,
-            show_progress: false,
-            keep_incremental_data: Some(false),
-        }
-    }
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Config {
-            threads: 10,
-            agent_parallelism: 1,
-            command: String::default(),
-            output: OutputProps::default(),
-            timeout: 60,
-        }
-    }
-}
-
-fn get_config(path: &Path) -> Config {
-    let f = match fs::read_to_string(path) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("Failed reading config. Using default values : {}", e);
-            return Config::default();
-        }
-    };
-    match toml::from_str(f.as_str()) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("Error parsing config:{}", e);
-            Config::default()
-        }
-    }
-}
-
-fn save_to_file(conf: &Config, data: Vec<Response>) {
-    let filename = match &conf.output.filename {
-        None => {
-            eprintln!("Filename to save is not given. Printing to stdout.");
-            save_to_console(&conf, &data);
-            return;
-        }
-        Some(a) => Path::new(a.as_str()),
-    };
-
-    let file = match File::create(filename) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("Erorr saving content to file:{}", e);
-            save_to_console(&conf, &data);
-            return;
-        }
-    };
-    if conf.output.pretty_format {
-        match serde_json::to_writer_pretty(file, &data) {
-            Ok(_) => println!("Saved successfully"),
-            Err(e) => eprintln!("Error saving: {}", e),
-        };
-    } else {
-        match serde_json::to_writer(file, &data) {
-            Ok(_) => println!("Saved successfully"),
-            Err(e) => eprintln!("Error saving: {}", e),
-        }
-    }
-}
-
-fn save_to_console(conf: &Config, data: &Vec<Response>) {
-    if conf.output.pretty_format {
-        println!("{}", serde_json::to_string_pretty(&data).unwrap())
-    } else {
-        println!("{}", serde_json::to_string(&data).unwrap())
-    }
-}
-
-fn generate_kv_hosts_from_csv(path: &str) -> Result<BTreeMap<Ipv4Addr, String>, std::io::Error> {
-    let mut rd = csv::ReaderBuilder::new().from_path(Path::new(path))?;
-    let mut map = BTreeMap::new();
-    for res in rd.records() {
-        let rec = match res {
-            Ok(a) => a,
-            Err(_) => continue,
-        };
-        let k: Ipv4Addr = match rec.get(0).unwrap().parse() {
-            Ok(a) => a,
-            Err(_) => continue,
-        };
-        let v = rec.get(1).unwrap();
-        println!("{} {}", &k, &v);
-        map.insert(k, v.to_string());
-    }
-    Ok(map)
-}
 
 fn main() {
     color_backtrace::install();
@@ -382,7 +212,6 @@ fn progress_bar_creator(queue_len: u64) -> ProgressBar {
 }
 
 fn incremental_save(rx: Receiver<Response>, props: &OutputProps, queue_len: u64, filename: &str) {
-    dbg!(queue_len);
     let store_dir_date = Utc::today().format("%d_%B_%Y").to_string();
     if !Path::new(&store_dir_date).exists() {
         std::fs::create_dir(Path::new(&store_dir_date))
@@ -413,7 +242,6 @@ fn incremental_save(rx: Receiver<Response>, props: &OutputProps, queue_len: u64,
     file.write_all(b"[\r\n")
         .expect("Writing for incremental saving failed");
     for _ in 0..=queue_len - 1 {
-        println!("loop");
         let received = match rx.recv() {
             Ok(a) => a,
             Err(e) => {
