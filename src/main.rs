@@ -1,109 +1,24 @@
 use std::collections::BTreeMap;
-use std::fmt::Display;
 use std::fs;
 use std::fs::File;
-use std::io::{Read};
 use std::io::prelude::*;
-use std::net::{Ipv4Addr, SocketAddrV4, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::thread::spawn;
-use std::time::Instant;
 mod misc;
 use misc::*;
 use chrono::Utc;
 use clap::{App, Arg};
 use clap::crate_version;
 use color_backtrace;
-use humantime::format_duration;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
-use ssh2::Session;
 use std_semaphore::Semaphore;
+mod host_processing;
+use host_processing::*;
 
-
-fn construct_error<A>(
-    hostname: &A,
-    start_time: Instant,
-    e: String,
-    tx: &SyncSender<Response>,
-) -> Response
-    where
-        A: Display + ToSocketAddrs,
-{
-    let response = Response {
-        result: e,
-        hostname: hostname.to_string(),
-        process_time: format_duration(Instant::now() - start_time).to_string(),
-        status: false,
-    };
-    match tx.send(response.clone()) {
-        Ok(_) => (),
-        Err(e) => eprintln!("Error sending response {}", e),
-    }
-    response
-}
-
-fn process_host(
-    host_ip: Ipv4Addr,
-    command: &str,
-    tx: SyncSender<Response>,
-    agent_lock: Arc<Semaphore>,
-    timeout: u32,
-) -> Response {
-    let start_time = Instant::now();
-    let hostname = SocketAddrV4::new(host_ip, 22);
-    let tcp = match TcpStream::connect(&hostname) {
-        Ok(a) => a,
-        Err(e) => return construct_error(&hostname, start_time, e.to_string(), &tx),
-    };
-    let mut sess = match Session::new() {
-        Ok(a) => a,
-        Err(e) => return construct_error(&hostname, start_time, e.to_string(), &tx),
-    };
-    sess.set_timeout(timeout);
-    sess.set_tcp_stream(tcp);
-    match sess.handshake() {
-        Ok(a) => a,
-        Err(e) => {
-            return construct_error(&hostname, start_time, e.to_string(), &tx);
-        }
-    };
-    let guard = agent_lock.access();
-    // Try to authenticate with the first identity in the agent.
-    match sess.userauth_agent("scan") {
-        Ok(_) => (),
-        Err(e) => {
-            return construct_error(&hostname, start_time, e.to_string(), &tx);
-        }
-    };
-    drop(guard);
-    let mut channel = match sess.channel_session() {
-        Ok(a) => a,
-        Err(e) => {
-            return construct_error(&hostname, start_time, e.to_string(), &tx);
-        }
-    };
-    channel.exec(command).unwrap();
-    let mut s = String::new();
-    if let Err(e) = channel.read_to_string(&mut s) {
-        return construct_error(&hostname, start_time, e.to_string(), &tx);
-    };
-    let end_time = Instant::now();
-    let response = Response {
-        hostname: hostname.to_string(),
-        result: s,
-        process_time: format_duration(end_time - start_time).to_string(),
-        status: true,
-    };
-    match tx.send(response.clone()) {
-        Ok(_) => (),
-        Err(e) => eprintln!("Error sending response {}", e),
-    };
-    response
-}
 
 
 
