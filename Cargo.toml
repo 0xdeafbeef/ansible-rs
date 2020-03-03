@@ -1,6 +1,6 @@
 [package]
 name = "ansible-rs"
-version = "1.2.1"
+version = "1.2.2"
 authors = ["0xd34db33f <0xd34db33f@noreply.github.com>"]
 edition = "2018"
 
@@ -22,3 +22,4 @@ rayon = "1.1"
 csv = "1.1"
 chrono = "0.4"
 xz2 = "0.1"
+tempfile ="3.1.0"
