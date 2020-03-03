@@ -27,7 +27,7 @@ where
     let response = Response {
         result: e,
         hostname: hostname.to_string(),
-        process_time: format_duration(Instant::now() - start_time).to_string(),
+        process_time: (Instant::now() - start_time).as_millis().to_string(),
         status: false,
     };
     match tx.send(response.clone()) {
@@ -86,7 +86,7 @@ pub fn process_host(
     let response = Response {
         hostname: hostname.to_string(),
         result: s,
-        process_time: format_duration(end_time - start_time).to_string(),
+        process_time: (Instant::now() - start_time).as_millis().to_string(),
         status: true,
     };
     match tx.send(response.clone()) {

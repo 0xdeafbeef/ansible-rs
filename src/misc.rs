@@ -37,8 +37,13 @@ pub struct Config {
 }
 #[derive(Deserialize, Debug, Clone)]
 pub struct ModulesParams {
-    path: String,
     modules: Option<HashMap<String, String>>,
+}
+impl ModulesParams{
+ fn new(self, modules_path: String )-> Option<HashMap<String, String>>{
+
+     None
+ }
 }
 impl Default for OutputProps {
     fn default() -> Self {
