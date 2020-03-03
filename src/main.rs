@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::{Path};
+use std::path::Path;
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::{mpsc, Arc};
 use std::thread::spawn;
@@ -66,7 +66,7 @@ fn main() {
     let props = config.output.clone();
     let queue_len = hosts.len() as u64;
     let datetime = Utc::now().format("%H_%M_%S").to_string();
-    let incremental_name = format!("{}", &datetime);
+    let incremental_name = datetime;
     let inc_for_closure = incremental_name.clone();
     let incremental_save_handle =
         spawn(move || incremental_save(rx, &props, queue_len, incremental_name.as_str()));
@@ -108,4 +108,3 @@ fn main() {
         }
     };
 }
-

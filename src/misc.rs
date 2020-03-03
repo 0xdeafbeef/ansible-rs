@@ -1,13 +1,13 @@
+use chrono::Utc;
+use indicatif::{ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
-use indicatif::{ProgressBar, ProgressStyle};
 use std::sync::mpsc::Receiver;
-use chrono::Utc;
 
 #[derive(Serialize, Debug, Clone)]
 pub struct Response {
@@ -36,8 +36,9 @@ pub struct Config {
     pub modules_path: Option<String>,
 }
 #[derive(Deserialize, Debug, Clone)]
-pub struct ModulesParams{
-    path  :String
+pub struct ModulesParams {
+    path: String,
+    modules: Option<HashMap<String, String>>,
 }
 impl Default for OutputProps {
     fn default() -> Self {
@@ -59,7 +60,7 @@ impl Default for Config {
             command: String::default(),
             output: OutputProps::default(),
             timeout: 60,
-            modules_path: Some("modules".to_string())
+            modules_path: Some("modules".to_string()),
         }
     }
 }
@@ -69,7 +70,7 @@ pub fn hosts_builder(path: &Path) -> Vec<Ipv4Addr> {
     let reader = BufReader::new(file);
     reader
         .lines()
-        .map(|l| l.unwrap_or("Error reading line".to_string()))
+        .map(|l| l.unwrap_or_else(|_| "Error reading line".to_string()))
         .map(|l| l.replace("\"", ""))
         .map(|l| l.replace("'", ""))
         .map(|l| l.parse())
@@ -146,7 +147,7 @@ pub fn save_to_file(conf: &Config, data: Vec<Response>) {
     }
 }
 
-pub fn save_to_console(conf: &Config, data: &Vec<Response>) {
+pub fn save_to_console(conf: &Config, data: &[Response]) {
     if conf.output.pretty_format {
         println!("{}", serde_json::to_string_pretty(&data).unwrap())
     } else {
@@ -163,14 +164,19 @@ fn progress_bar_creator(queue_len: u64) -> ProgressBar {
     total_hosts_processed
 }
 
-pub fn incremental_save(rx: Receiver<Response>, props: &OutputProps, queue_len: u64, filename: &str) {
+pub fn incremental_save(
+    rx: Receiver<Response>,
+    props: &OutputProps,
+    queue_len: u64,
+    filename: &str,
+) {
     let store_dir_date = Utc::today().format("%d_%B_%Y").to_string();
     if !Path::new(&store_dir_date).exists() {
         std::fs::create_dir(Path::new(&store_dir_date))
             .expect("Failed creating dir for temporary save");
     }
     let incremental_name =
-        PathBuf::from(store_dir_date.clone() + "/incremental_" + &filename + ".json");
+        PathBuf::from(store_dir_date.clone() + "/incremental_" + filename + ".json");
     let mut file = match File::create(incremental_name) {
         Ok(a) => a,
         Err(e) => {
@@ -193,7 +199,7 @@ pub fn incremental_save(rx: Receiver<Response>, props: &OutputProps, queue_len: 
     let mut ko = 0;
     file.write_all(b"[\r\n")
         .expect("Writing for incremental saving failed");
-    for _ in 0..=queue_len - 1 {
+    for _ in 0..queue_len {
         let received = match rx.recv() {
             Ok(a) => a,
             Err(e) => {

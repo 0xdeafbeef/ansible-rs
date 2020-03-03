@@ -1,6 +1,6 @@
 use crate::misc::Response;
 use humantime::format_duration;
-use ssh2::Session;
+use ssh2::{Session, Channel};
 use std::fmt::Display;
 use std::io::Read;
 use std::net::{Ipv4Addr, SocketAddrV4, TcpStream, ToSocketAddrs};
@@ -8,6 +8,12 @@ use std::sync::mpsc::SyncSender;
 use std::sync::Arc;
 use std::time::Instant;
 use std_semaphore::Semaphore;
+use ssh2::Error;
+use std::path::Path;
+use tempfile::tempfile;
+use xz2::read::{XzEncoder, XzDecoder};
+
+
 
 pub fn construct_error<A>(
     hostname: &A,
