@@ -95,7 +95,7 @@ fn main() {
                 data.1,
                 tx.clone(),
                 agent_parallelism.clone(),
-                timeout,
+                timeout, false
             )
         })
         .collect();

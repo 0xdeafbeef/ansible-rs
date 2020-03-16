@@ -9,7 +9,6 @@ use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, SyncSender};
 use toml::Value;
-use toml::de::Error;
 use std::sync::Arc;
 use std_semaphore::Semaphore;
 use rayon::prelude::*;
@@ -187,6 +186,10 @@ fn progress_bar_creator(queue_len: u64) -> ProgressBar {
 
 pub fn benchmark(hosts: BTreeMap<Ipv4Addr, String>, tx: &SyncSender<Response>, threads_number: usize)
 {
+    if hosts.is_empty(){
+        println!("Benchmark failed. There no hosts to test");
+        std::process::exit(1);
+    }
     println!("Benchmark started");
     let mut rate_numeric: isize = 2;
     let mut error_rate = 0.0;
@@ -209,6 +212,7 @@ pub fn benchmark(hosts: BTreeMap<Ipv4Addr, String>, tx: &SyncSender<Response>, t
                     tx.clone(),
                     rate_limit.clone(),
                     120*1000,
+                    true
                 )
             })
             .inspect(|a| println!("{:?}", a))
