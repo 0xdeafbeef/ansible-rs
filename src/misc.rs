@@ -1,5 +1,7 @@
+use crate::host_processing::process_host;
 use chrono::Utc;
 use indicatif::{ProgressBar, ProgressStyle};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -8,11 +10,9 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, SyncSender};
-use toml::Value;
 use std::sync::Arc;
 use std_semaphore::Semaphore;
-use rayon::prelude::*;
-use crate::host_processing::process_host;
+use toml::Value;
 
 #[derive(Serialize, Debug, Clone)]
 pub struct Response {
@@ -48,7 +48,11 @@ pub struct ModulesParams {
 }
 
 impl ModulesParams {
-    fn new(self, modules_path: String, module_command: HashMap<String, String>) -> Option<HashMap<String, String>> {
+    fn new(
+        self,
+        modules_path: String,
+        module_command: HashMap<String, String>,
+    ) -> Option<HashMap<String, String>> {
         None
     }
 }
@@ -129,7 +133,9 @@ pub fn get_config(path: &Path) -> Config {
         }
     };
     let modules_table = match &f.parse::<Value>() {
-        Ok(a) => { dbg!(a.get("modules")); }
+        Ok(a) => {
+            dbg!(a.get("modules"));
+        }
         Err(_) => {}
     };
     config
@@ -184,9 +190,12 @@ fn progress_bar_creator(queue_len: u64) -> ProgressBar {
     total_hosts_processed
 }
 
-pub fn benchmark(hosts: BTreeMap<Ipv4Addr, String>, tx: &SyncSender<Response>, threads_number: usize)
-{
-    if hosts.is_empty(){
+pub fn benchmark(
+    hosts: BTreeMap<Ipv4Addr, String>,
+    tx: &SyncSender<Response>,
+    threads_number: usize,
+) {
+    if hosts.is_empty() {
         println!("Benchmark failed. There no hosts to test");
         std::process::exit(1);
     }
@@ -198,23 +207,16 @@ pub fn benchmark(hosts: BTreeMap<Ipv4Addr, String>, tx: &SyncSender<Response>, t
     while error_rate <= 10.0 && rate_numeric <= threads_number as isize {
         let slice_size = if hosts.len() <= bench_hosts_number {
             hosts.len()
-        } else { bench_hosts_number };
+        } else {
+            bench_hosts_number
+        };
 
         let hosts_vec = Vec::from(&hosts_vec[0..slice_size]);
         let rate_limit = Arc::new(Semaphore::new(rate_numeric));
         let mut ko = 0;
         let res: Vec<Response> = hosts_vec
             .par_iter()
-            .map(|data| {
-                process_host(
-                    *data,
-                    "",
-                    tx.clone(),
-                    rate_limit.clone(),
-                    120*1000,
-                    true
-                )
-            })
+            .map(|data| process_host(*data, "", tx.clone(), rate_limit.clone(), 120 * 1000, true))
             .inspect(|a| println!("{:?}", a))
             .collect();
         println!("Done");
@@ -229,10 +231,14 @@ pub fn benchmark(hosts: BTreeMap<Ipv4Addr, String>, tx: &SyncSender<Response>, t
             }
         }
         error_rate = ko as f64 / hosts_vec.len() as f64;
-        println!("With rate limit {:?} there is {} error rate.", rate_numeric, error_rate);
+        println!(
+            "With rate limit {:?} there is {} error rate.",
+            rate_numeric, error_rate
+        );
         rate_numeric += 1;
-        bench_hosts_number = bench_hosts_number * ((rate_numeric as usize - 1) / rate_numeric as usize);
-    };
+        bench_hosts_number =
+            bench_hosts_number * ((rate_numeric as usize - 1) / rate_numeric as usize);
+    }
 }
 
 pub fn incremental_save(

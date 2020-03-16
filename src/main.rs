@@ -51,7 +51,7 @@ fn main() {
                 .short("b")
                 .long("benchmark")
                 .help("Benchmark network/token")
-                .long_help("Becnchmarks token. Returns ops with no fail")
+                .long_help("Becnchmarks token. Returns ops with no fail"),
         )
         .get_matches();
     let config = get_config(Path::new(&args.value_of("config").unwrap()));
@@ -95,7 +95,8 @@ fn main() {
                 data.1,
                 tx.clone(),
                 agent_parallelism.clone(),
-                timeout, false
+                timeout,
+                false,
             )
         })
         .collect();
