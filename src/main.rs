@@ -3,7 +3,9 @@ use std::path::Path;
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::{mpsc, Arc};
 use std::thread::spawn;
+
 mod misc;
+
 use chrono::Utc;
 use clap::crate_version;
 use clap::{App, Arg};
@@ -44,8 +46,16 @@ fn main() {
                 .long_help("Hosts format: csv for key value and empty(default) for list")
                 .default_value(""),
         )
+        .arg(
+            Arg::with_name("benchmark")
+                .short("b")
+                .long("benchmark")
+                .help("Benchmark network/token")
+                .long_help("Becnchmarks token. Returns ops with no fail")
+        )
         .get_matches();
     let config = get_config(Path::new(&args.value_of("config").unwrap()));
+
     let command = &config.command;
 
     let hosts = if args.value_of("hosts_format").unwrap() == "csv" {
@@ -65,6 +75,11 @@ fn main() {
     let (tx, rx): (SyncSender<Response>, Receiver<Response>) = mpsc::sync_channel(0);
     let props = config.output.clone();
     let queue_len = hosts.len() as u64;
+    if args.is_present("benchmark") {
+        benchmark(hosts, &tx, config.threads);
+        return;
+    }
+
     let datetime = Utc::now().format("%H_%M_%S").to_string();
     let incremental_name = datetime;
     let inc_for_closure = incremental_name.clone();

@@ -7,7 +7,13 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, SyncSender};
+use toml::Value;
+use toml::de::Error;
+use std::sync::Arc;
+use std_semaphore::Semaphore;
+use rayon::prelude::*;
+use crate::host_processing::process_host;
 
 #[derive(Serialize, Debug, Clone)]
 pub struct Response {
@@ -34,17 +40,20 @@ pub struct Config {
     pub command: String,
     pub timeout: u32,
     pub modules_path: Option<String>,
+    // pub modules
 }
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct ModulesParams {
     modules: Option<HashMap<String, String>>,
 }
-impl ModulesParams{
- fn new(self, modules_path: String )-> Option<HashMap<String, String>>{
 
-     None
- }
+impl ModulesParams {
+    fn new(self, modules_path: String, module_command: HashMap<String, String>) -> Option<HashMap<String, String>> {
+        None
+    }
 }
+
 impl Default for OutputProps {
     fn default() -> Self {
         OutputProps {
@@ -112,13 +121,19 @@ pub fn get_config(path: &Path) -> Config {
             return Config::default();
         }
     };
-    match toml::from_str(f.as_str()) {
+
+    let mut config = match toml::from_str(&f) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("Error parsing config:{}", e);
             Config::default()
         }
-    }
+    };
+    let modules_table = match &f.parse::<Value>() {
+        Ok(a) => { dbg!(a.get("modules")); }
+        Err(_) => {}
+    };
+    config
 }
 
 pub fn save_to_file(conf: &Config, data: Vec<Response>) {
@@ -159,6 +174,7 @@ pub fn save_to_console(conf: &Config, data: &[Response]) {
         println!("{}", serde_json::to_string(&data).unwrap())
     }
 }
+
 fn progress_bar_creator(queue_len: u64) -> ProgressBar {
     let total_hosts_processed = ProgressBar::new(queue_len);
     let total_style = ProgressStyle::default_bar()
@@ -167,6 +183,52 @@ fn progress_bar_creator(queue_len: u64) -> ProgressBar {
     total_hosts_processed.set_style(total_style);
 
     total_hosts_processed
+}
+
+pub fn benchmark(hosts: BTreeMap<Ipv4Addr, String>, tx: &SyncSender<Response>, threads_number: usize)
+{
+    println!("Benchmark started");
+    let mut rate_numeric: isize = 2;
+    let mut error_rate = 0.0;
+    let hosts_vec: Vec<Ipv4Addr> = hosts.keys().cloned().collect();
+    let mut bench_hosts_number: usize = 10;
+    while error_rate <= 10.0 && rate_numeric <= threads_number as isize {
+        let slice_size = if hosts.len() <= bench_hosts_number {
+            hosts.len()
+        } else { bench_hosts_number };
+
+        let hosts_vec = Vec::from(&hosts_vec[0..slice_size]);
+        let rate_limit = Arc::new(Semaphore::new(rate_numeric));
+        let mut ko = 0;
+        let res: Vec<Response> = hosts_vec
+            .par_iter()
+            .map(|data| {
+                process_host(
+                    *data,
+                    "",
+                    tx.clone(),
+                    rate_limit.clone(),
+                    120*1000,
+                )
+            })
+            .inspect(|a| println!("{:?}", a))
+            .collect();
+        println!("Done");
+
+        for received in res {
+            if !received.status {
+                let error_string = received.result.as_str();
+                if error_string.contains("[-42]") {
+                    ko += 1;
+                    continue;
+                }
+            }
+        }
+        error_rate = ko as f64 / hosts_vec.len() as f64;
+        println!("With rate limit {:?} there is {} error rate.", rate_numeric, error_rate);
+        rate_numeric += 1;
+        bench_hosts_number = bench_hosts_number * ((rate_numeric as usize - 1) / rate_numeric as usize);
+    };
 }
 
 pub fn incremental_save(

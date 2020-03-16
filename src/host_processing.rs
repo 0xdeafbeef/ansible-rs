@@ -14,15 +14,15 @@ use tempfile::tempfile;
 use xz2::read::{XzEncoder, XzDecoder};
 
 
-
 pub fn construct_error<A>(
     hostname: &A,
     start_time: Instant,
     e: String,
     tx: &SyncSender<Response>,
+    benchmark_mode:bool
 ) -> Response
-where
-    A: Display + ToSocketAddrs,
+    where
+        A: Display + ToSocketAddrs,
 {
     let response = Response {
         result: e,
@@ -43,6 +43,7 @@ pub fn process_host(
     tx: SyncSender<Response>,
     agent_lock: Arc<Semaphore>,
     timeout: u32,
+    benchmark_mode: bool,
 ) -> Response {
     let start_time = Instant::now();
     let hostname = SocketAddrV4::new(host_ip, 22);
@@ -82,7 +83,6 @@ pub fn process_host(
     if let Err(e) = channel.read_to_string(&mut s) {
         return construct_error(&hostname, start_time, e.to_string(), &tx);
     };
-    let end_time = Instant::now();
     let response = Response {
         hostname: hostname.to_string(),
         result: s,
@@ -93,5 +93,6 @@ pub fn process_host(
         Ok(_) => (),
         Err(e) => eprintln!("Error sending response {}", e),
     };
+
     response
 }
