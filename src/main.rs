@@ -1,26 +1,26 @@
 use clap::{App, Arg};
+use color_backtrace;
+use humantime::format_duration;
+use indicatif::{ProgressBar, ProgressStyle};
+use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::fs;
 use std::fs::File;
 use std::io::prelude::*;
 use std::io::{BufReader, Read};
 use std::path::Path;
-use std::sync::{mpsc, Arc};
 use std::sync::mpsc::{Receiver, SyncSender};
+use std::sync::{mpsc, Arc};
 use std::time::UNIX_EPOCH;
 use std::time::{Duration, Instant};
-use color_backtrace;
-use humantime::format_duration;
-use indicatif::{ProgressBar, ProgressStyle};
-use serde::{Deserialize, Serialize};
 //use ssh2::{Error, PublicKey, Session};
 use async_ssh2::{Error, PublicKey, Session};
-use tokio::sync::Semaphore;
-use tokio::prelude::*;
-use std::thread::spawn;
-use std::net::{TcpStream, ToSocketAddrs};
-use tokio::runtime::Builder;
 use num_cpus::get;
+use std::net::{TcpStream, ToSocketAddrs};
+use std::thread::spawn;
+use tokio::prelude::*;
+use tokio::runtime::Builder;
+use tokio::sync::Semaphore;
 
 #[derive(Serialize, Debug, Clone)]
 struct Response {
@@ -36,8 +36,8 @@ fn construct_error<A>(
     e: String,
     tx: &SyncSender<Response>,
 ) -> Response
-    where
-        A: Display + ToSocketAddrs,
+where
+    A: Display + ToSocketAddrs,
 {
     dbg!("Constructing error");
     let response = Response {
@@ -53,9 +53,6 @@ fn construct_error<A>(
     response
 }
 
-
-
-
 fn hosts_builder(path: &Path) -> Vec<String> {
     let file = File::open(path).expect("Unable to open the file");
     let reader = BufReader::new(file);
@@ -66,9 +63,14 @@ fn hosts_builder(path: &Path) -> Vec<String> {
 }
 
 //#[cfg(debug_asserions)]
-async fn process_host_test<A>(hostname: A, command: Arc<String>, tx: SyncSender<Response>, connection_pool: Arc<Semaphore>) -> Response
-    where
-        A: Display + ToSocketAddrs,
+async fn process_host_test<A>(
+    hostname: A,
+    command: Arc<String>,
+    tx: SyncSender<Response>,
+    connection_pool: Arc<Semaphore>,
+) -> Response
+where
+    A: Display + ToSocketAddrs,
 {
     use rand::prelude::*;
     use std::thread::sleep;
@@ -199,7 +201,7 @@ fn save_to_console(conf: &Config, data: &Vec<Response>) {
 }
 
 fn main() {
-//    color_backtrace::install();
+    //    color_backtrace::install();
     let args = App::new("SSH analyzer")
         .arg(
             Arg::with_name("config")
@@ -240,9 +242,17 @@ fn main() {
         .build()
         .unwrap();
     let num_of_threads = Arc::new(Semaphore::new(config.threads));
-    let tasks: Vec<_> = hosts.into_iter().map(|host| {
-        reactor.spawn(process_host(host, command.clone(), tx.clone(), num_of_threads.clone()))
-    }).collect();
+    let tasks: Vec<_> = hosts
+        .into_iter()
+        .map(|host| {
+            reactor.spawn(process_host(
+                host,
+                command.clone(),
+                tx.clone(),
+                num_of_threads.clone(),
+            ))
+        })
+        .collect();
     reactor.block_on(futures::future::join_all(tasks));
     match config.output.keep_incremental_data {
         Some(true) => {}
@@ -279,7 +289,7 @@ fn incremental_save(rx: Receiver<Response>, props: &OutputProps, queue_len: u64,
             return;
         }
     };
-//    let total = progress_bar_creator(queue_len);
+    //    let total = progress_bar_creator(queue_len);
     let total = ProgressBar::hidden();
     let mut ok = 0;
     let mut ko = 0;
