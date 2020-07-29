@@ -14,6 +14,7 @@ use std::sync::{mpsc, Arc};
 use std::time::UNIX_EPOCH;
 use std::time::{Duration, Instant};
 //use ssh2::{Error, PublicKey, Session};
+use ansible_rs::ParallelSshProps;
 use async_ssh2::{Error, PublicKey, Session};
 use num_cpus::get;
 use std::net::{TcpStream, ToSocketAddrs};
@@ -60,48 +61,6 @@ fn hosts_builder(path: &Path) -> Vec<String> {
         .lines()
         .map(|l| l.unwrap() + ":22")
         .collect::<Vec<String>>()
-}
-
-//#[cfg(debug_asserions)]
-async fn process_host_test<A>(
-    hostname: A,
-    command: Arc<String>,
-    tx: SyncSender<Response>,
-    connection_pool: Arc<Semaphore>,
-) -> Response
-where
-    A: Display + ToSocketAddrs,
-{
-    use rand::prelude::*;
-    use std::thread::sleep;
-    let start_time = Instant::now();
-    let mut rng = rand::rngs::OsRng;
-    let stat: bool = rng.gen();
-    let wait_time = rng.gen_range(2, 15);
-    let guard = connection_pool.acquire().await;
-    tokio::time::delay_for(Duration::from_secs(wait_time)).await;
-    println!("Processing {}", &hostname);
-    if !stat {
-        return construct_error(
-            &hostname,
-            start_time,
-            "Proizoshel trolling".to_string(),
-            &tx,
-        );
-    }
-    let end_time = Instant::now();
-    let response = Response {
-        hostname: hostname.to_string(),
-        result: "test".to_string(),
-        process_time: format_duration(end_time - start_time).to_string(),
-        status: true,
-    };
-    match tx.send(response.clone()) {
-        Ok(_) => (),
-        Err(e) => eprintln!("Error sending data via channel: {}", e),
-    };
-    println!("Finished processing {}", &hostname);
-    response
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -201,7 +160,7 @@ fn save_to_console(conf: &Config, data: &Vec<Response>) {
 }
 
 fn main() {
-    //    color_backtrace::install();
+    color_backtrace::install();
     let args = App::new("SSH analyzer")
         .arg(
             Arg::with_name("config")
@@ -235,25 +194,9 @@ fn main() {
     let incremental_name = format!("incremental_{}.json", &datetime);
     let inc_for_closure = incremental_name.clone();
     spawn(move || incremental_save(rx, &props, queue_len, incremental_name.as_str()));
-    let mut reactor = Builder::new()
-        .enable_all()
-        .threaded_scheduler()
-        .core_threads(get())
-        .build()
-        .unwrap();
     let num_of_threads = Arc::new(Semaphore::new(config.threads));
-    let tasks: Vec<_> = hosts
-        .into_iter()
-        .map(|host| {
-            reactor.spawn(process_host(
-                host,
-                command.clone(),
-                tx.clone(),
-                num_of_threads.clone(),
-            ))
-        })
-        .collect();
-    reactor.block_on(futures::future::join_all(tasks));
+    let processor = ParallelSshProps::new(10);
+    processor.parallel_ssh_process(hosts, &config.command.clone());
     match config.output.keep_incremental_data {
         Some(true) => {}
         Some(false) => {
