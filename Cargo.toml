@@ -21,7 +21,9 @@ rand = "0.7.3"
 crossterm = "0.14"
 tui = { version = "0.8", default-features = false, features = ['crossterm'] }
 async-ssh2 = "0.1.1-beta"
-smol = { version = "0.3", features = ["tokio02"] }
+smol = { version = "0.1", features = ["tokio02"] }
 num_cpus = "1.0"
 futures = "0.3.1"
 tokio-trace = "0.1.0"
+tokio = { version= "0.2", features=["sync"] }
+anyhow = "1.0.32"
