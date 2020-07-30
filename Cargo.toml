@@ -27,3 +27,4 @@ futures = "0.3.1"
 tokio-trace = "0.1.0"
 tokio = { version= "0.2", features=["sync"] }
 anyhow = "1.0.32"
+async-executor = "0.1.2"

@@ -1,5 +1,8 @@
+use ansible_rs::ParallelSshProps;
+use ansible_rs::Response;
 use clap::{App, Arg};
 use color_backtrace;
+use futures::executor::block_on;
 use humantime::format_duration;
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
@@ -7,53 +10,15 @@ use std::fmt::Display;
 use std::fs;
 use std::fs::File;
 use std::io::prelude::*;
-use std::io::{BufReader, Read};
+use std::io::BufReader;
+use std::net::ToSocketAddrs;
 use std::path::Path;
-use std::sync::mpsc::{Receiver, SyncSender};
+use std::process::exit;
 use std::sync::{mpsc, Arc};
-use std::time::UNIX_EPOCH;
-use std::time::{Duration, Instant};
-//use ssh2::{Error, PublicKey, Session};
-use ansible_rs::ParallelSshProps;
-use async_ssh2::{Error, PublicKey, Session};
-use num_cpus::get;
-use std::net::{TcpStream, ToSocketAddrs};
 use std::thread::spawn;
-use tokio::prelude::*;
-use tokio::runtime::Builder;
-use tokio::sync::Semaphore;
-
-#[derive(Serialize, Debug, Clone)]
-struct Response {
-    result: String,
-    hostname: String,
-    process_time: String,
-    status: bool,
-}
-
-fn construct_error<A>(
-    hostname: &A,
-    start_time: Instant,
-    e: String,
-    tx: &SyncSender<Response>,
-) -> Response
-where
-    A: Display + ToSocketAddrs,
-{
-    dbg!("Constructing error");
-    let response = Response {
-        result: e,
-        hostname: hostname.to_string(),
-        process_time: format_duration(Instant::now() - start_time).to_string(),
-        status: false,
-    };
-    match tx.send(response.clone()) {
-        Ok(_) => (),
-        Err(e) => eprintln!("Error sending response {}", e),
-    }
-    response
-}
-
+use std::time::Instant;
+use std::time::UNIX_EPOCH;
+use tokio::sync::mpsc::Receiver;
 fn hosts_builder(path: &Path) -> Vec<String> {
     let file = File::open(path).expect("Unable to open the file");
     let reader = BufReader::new(file);
@@ -133,7 +98,7 @@ fn save_to_file(conf: &Config, data: Vec<Response>) {
     let file = match File::create(filename) {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("Erorr saving content to file:{}", e);
+            eprintln!("Error saving content to file:{}", e);
             save_to_console(&conf, &data);
             return;
         }
@@ -182,8 +147,6 @@ fn main() {
     let hosts = hosts_builder(Path::new(&args.value_of("hosts").unwrap()));
     let config = get_config(Path::new(&args.value_of("config").unwrap()));
     dbg!(&config);
-    let command = Arc::new(config.command.clone());
-    let (tx, rx): (SyncSender<Response>, Receiver<Response>) = mpsc::sync_channel(0);
     let props = config.output.clone();
     let queue_len = hosts.len() as u64;
     let datetime = std::time::SystemTime::now()
@@ -193,10 +156,9 @@ fn main() {
         .to_string();
     let incremental_name = format!("incremental_{}.json", &datetime);
     let inc_for_closure = incremental_name.clone();
+    let (rx, processor) = ParallelSshProps::new(10);
     spawn(move || incremental_save(rx, &props, queue_len, incremental_name.as_str()));
-    let num_of_threads = Arc::new(Semaphore::new(config.threads));
-    let processor = ParallelSshProps::new(10);
-    processor.parallel_ssh_process(hosts, &config.command.clone());
+    smol::block_on(processor.parallel_ssh_process(hosts, &config.command.clone()));
     match config.output.keep_incremental_data {
         Some(true) => {}
         Some(false) => {
@@ -224,7 +186,12 @@ fn progress_bar_creator(queue_len: u64) -> ProgressBar {
     total_hosts_processed
 }
 
-fn incremental_save(rx: Receiver<Response>, props: &OutputProps, queue_len: u64, filename: &str) {
+fn incremental_save(
+    mut rx: Receiver<Response>,
+    _props: &OutputProps,
+    queue_len: u64,
+    filename: &str,
+) {
     let mut file = match File::create(Path::new(filename)) {
         Ok(a) => a,
         Err(e) => {
@@ -238,12 +205,13 @@ fn incremental_save(rx: Receiver<Response>, props: &OutputProps, queue_len: u64,
     let mut ko = 0;
     file.write_all(b"[\r\n")
         .expect("Writing for incremental saving failed");
+
     for _ in 0..=queue_len {
-        let received = match rx.recv() {
-            Ok(a) => a,
-            Err(e) => {
-                eprintln!("incremental_save: {}", e);
-                break;
+        let received = match block_on(rx.recv()) {
+            Some(a) => a,
+            None => {
+                eprintln!("Error receiving stats");
+                exit(1);
             }
         };
         if received.status {
@@ -260,5 +228,4 @@ fn incremental_save(rx: Receiver<Response>, props: &OutputProps, queue_len: u64,
     }
     file.write_all(b"\n]")
         .expect("Writing for incremental saving failed");
-    dbg!("Exited inc");
 }
