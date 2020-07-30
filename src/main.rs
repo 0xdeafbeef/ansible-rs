@@ -3,20 +3,20 @@ use ansible_rs::Response;
 use clap::{App, Arg};
 use color_backtrace;
 use futures::executor::block_on;
-use humantime::format_duration;
+
 use indicatif::{ProgressBar, ProgressStyle};
-use serde::{Deserialize, Serialize};
-use std::fmt::Display;
+use serde::{Deserialize};
+
 use std::fs;
 use std::fs::File;
 use std::io::prelude::*;
 use std::io::BufReader;
-use std::net::ToSocketAddrs;
+
 use std::path::Path;
 use std::process::exit;
-use std::sync::{mpsc, Arc};
+
 use std::thread::spawn;
-use std::time::Instant;
+
 use std::time::UNIX_EPOCH;
 use tokio::sync::mpsc::Receiver;
 fn hosts_builder(path: &Path) -> Vec<String> {
