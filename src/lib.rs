@@ -1,16 +1,12 @@
 use anyhow::Error;
-use async_ssh2::{PublicKey, Session};
-use clap::{App, Arg};
-use humantime::format_duration;
+use async_executor::{Executor, Spawner};
+use async_ssh2::Session;
+use futures::future::join_all;
 use serde::Serialize;
 use smol::Async;
 use std::fmt::Display;
-use std::fs;
-use std::fs::File;
-use std::io::prelude::*;
-use std::io::{BufReader, Read};
+use std::io::Read;
 use std::net::{TcpStream, ToSocketAddrs};
-use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
@@ -18,9 +14,10 @@ use tokio::sync::Semaphore;
 
 #[derive(Serialize, Debug, Clone)]
 pub struct Response {
-    result: String,
-    hostname: String,
-    process_time: Duration,
+    pub result: String,
+    pub hostname: String,
+    pub process_time: Duration,
+    pub status: bool,
 }
 
 async fn process_host<A>(
@@ -39,11 +36,13 @@ async fn process_host<A>(
             result: a,
             hostname: hostname.to_string(),
             process_time,
+            status: true,
         },
         Err(e) => Response {
             result: e.to_string(),
             hostname: hostname.to_string(),
             process_time,
+            status: false,
         },
     };
     if let Err(e) = tx.send(response).await {
@@ -62,17 +61,21 @@ where
     let guard = connection_pool.acquire().await;
     let sync_stream = TcpStream::connect(&hostname)?;
     let tcp = Async::new(sync_stream)?;
-    let mut sess = Session::new().map_err(|e| Error::msg(format!("Error initializing session")))?;
+    let mut sess =
+        Session::new().map_err(|_e| Error::msg(format!("Error initializing session")))?;
+    dbg!("Session initialized");
     const TIMEOUT: u32 = 6000;
     sess.set_timeout(TIMEOUT);
-    sess.set_tcp_stream(tcp);
+    sess.set_tcp_stream(tcp)?;
     sess.handshake()
         .await
         .map_err(|e| Error::msg(format!("Failed establishing handshake: {}", e)))?;
+    dbg!("Handshake done");
     let mut agent = sess
         .agent()
         .map_err(|e| Error::msg(format!("Failed connecting to agent: {}", e)))?;
     agent.connect().await?;
+    dbg!("Agent connected");
     drop(guard); //todo test, that it really works
     let mut channel = sess
         .channel_session()
@@ -92,45 +95,44 @@ where
 
 pub struct ParallelSshProps {
     maximum_connections: usize,
-}
-impl Default for ParallelSshProps {
-    fn default() -> Self {
-        ParallelSshProps {
-            maximum_connections: 1,
-        }
-    }
+    tx: Sender<Response>,
 }
 
 impl ParallelSshProps {
-    pub fn new(max_connections: usize) -> ParallelSshProps {
-        Self {
-            maximum_connections: max_connections,
-        }
+    pub fn new(max_connections: usize) -> (Receiver<Response>, ParallelSshProps) {
+        let (tx, rx) = channel(max_connections * 2);
+        (
+            rx,
+            Self {
+                maximum_connections: max_connections,
+                tx,
+            },
+        )
     }
 
-    pub fn parallel_ssh_process<A: 'static>(
-        mut self,
-        hosts: Vec<A>,
-        command: &str,
-    ) -> Receiver<Response>
+    pub async fn parallel_ssh_process<A: 'static>(self, hosts: Vec<A>, command: &str)
     where
         A: Display + ToSocketAddrs + Send + Sync + Clone,
     {
+        let ex = Executor::new();
+        let spawner = Spawner::current();
         let num_of_threads = Arc::new(Semaphore::new(self.maximum_connections));
-        let (tx, rx): (Sender<Response>, Receiver<Response>) =
-            channel(self.maximum_connections * 2); //todo check this
-        hosts
-            .into_iter()
-            .map(|host| {
-                smol::Task::spawn(process_host(
-                    host,
-                    Arc::new(command.to_string()),
-                    tx.clone(),
-                    num_of_threads.clone(),
-                ))
-                .detach();
-            })
-            .for_each(|_| ());
-        rx
+        ex.run(async {
+            let tasks: Vec<_> = hosts
+                .into_iter()
+                .inspect(|a| println!("Hostname: {}", a))
+                .map(|host| {
+                    spawner.spawn(process_host(
+                        host,
+                        Arc::new(command.to_string()),
+                        self.tx.clone(),
+                        num_of_threads.clone(),
+                    ))
+                })
+                .collect();
+            join_all(tasks).await;
+        });
+
+        println!("Waiting");
     }
 }
