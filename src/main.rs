@@ -2,23 +2,20 @@ use ansible_rs::ParallelSshProps;
 use ansible_rs::Response;
 use clap::{App, Arg};
 use color_backtrace;
-use futures::executor::block_on;
-
 use indicatif::{ProgressBar, ProgressStyle};
-use serde::{Deserialize};
-
+use serde::Deserialize;
 use std::fs;
 use std::fs::File;
 use std::io::prelude::*;
 use std::io::BufReader;
-
 use std::path::Path;
 use std::process::exit;
-
 use std::thread::spawn;
 
+use async_executor::LocalExecutor;
+use futures_channel::mpsc::{channel, Receiver, Sender};
 use std::time::UNIX_EPOCH;
-use tokio::sync::mpsc::Receiver;
+
 fn hosts_builder(path: &Path) -> Vec<String> {
     let file = File::open(path).expect("Unable to open the file");
     let reader = BufReader::new(file);
@@ -158,7 +155,13 @@ fn main() {
     let inc_for_closure = incremental_name.clone();
     let (rx, processor) = ParallelSshProps::new(10);
     spawn(move || incremental_save(rx, &props, queue_len, incremental_name.as_str()));
-    smol::block_on(processor.parallel_ssh_process(hosts, &config.command.clone()));
+    let local_ex = LocalExecutor::new();
+    local_ex.run(async {
+        processor
+            .parallel_ssh_process(hosts, &config.command.clone())
+            .await;
+    });
+
     match config.output.keep_incremental_data {
         Some(true) => {}
         Some(false) => {
@@ -205,12 +208,14 @@ fn incremental_save(
     let mut ko = 0;
     file.write_all(b"[\r\n")
         .expect("Writing for incremental saving failed");
-
     for _ in 0..=queue_len {
-        let received = match block_on(rx.recv()) {
-            Some(a) => a,
-            None => {
-                eprintln!("Error receiving stats");
+        let received = match rx.try_next() {
+            Ok(a) => match a {
+                Some(a) => a,
+                None => continue,
+            },
+            Err(e) => {
+                eprintln!("Error receiving stats :{}", e);
                 exit(1);
             }
         };

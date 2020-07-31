@@ -2,6 +2,7 @@ use anyhow::Error;
 use async_executor::{Executor, Spawner};
 use async_ssh2::Session;
 use futures::future::join_all;
+use futures_channel::mpsc::{channel, Receiver, Sender};
 use serde::Serialize;
 use smol::Async;
 use std::fmt::Display;
@@ -9,9 +10,7 @@ use std::io::Read;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::Semaphore;
-
 #[derive(Serialize, Debug, Clone)]
 pub struct Response {
     pub result: String,
@@ -29,7 +28,7 @@ async fn process_host<A>(
     A: ToSocketAddrs + Display + Sync + Clone + Send,
 {
     let start_time = Instant::now();
-    let result = process_host_inner(hostname.clone(), command, connection_pool).await;
+    let result = dbg!(process_host_inner(hostname.clone(), command, connection_pool).await);
     let process_time = Instant::now() - start_time;
     let response = match result {
         Ok(a) => Response {
@@ -45,7 +44,7 @@ async fn process_host<A>(
             status: false,
         },
     };
-    if let Err(e) = tx.send(response).await {
+    if let Err(e) = tx.start_send(response) {
         eprintln!("Error sending result via channel: {}", e);
     };
 }
@@ -76,11 +75,12 @@ where
         .map_err(|e| Error::msg(format!("Failed connecting to agent: {}", e)))?;
     agent.connect().await?;
     dbg!("Agent connected");
-    drop(guard); //todo test, that it really works
+    // drop(guard); //todo test, that it really works
     let mut channel = sess
         .channel_session()
         .await
         .map_err(|e| Error::msg(format!("Failed openning channel: {}", e)))?;
+    dbg!("Chanel opened");
     channel
         .exec(&command)
         .await
@@ -115,9 +115,9 @@ impl ParallelSshProps {
         A: Display + ToSocketAddrs + Send + Sync + Clone,
     {
         let ex = Executor::new();
-        let spawner = Spawner::current();
         let num_of_threads = Arc::new(Semaphore::new(self.maximum_connections));
         ex.run(async {
+            let spawner = Spawner::current();
             let tasks: Vec<_> = hosts
                 .into_iter()
                 .inspect(|a| println!("Hostname: {}", a))
@@ -132,7 +132,5 @@ impl ParallelSshProps {
                 .collect();
             join_all(tasks).await;
         });
-
-        println!("Waiting");
     }
 }
