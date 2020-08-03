@@ -13,6 +13,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 
+#[macro_use]
+extern crate derive_builder;
+
 #[derive(Serialize, Debug, Clone)]
 pub struct Response {
     pub result: String,
@@ -21,9 +24,19 @@ pub struct Response {
     pub status: bool,
 }
 
+#[derive(Builder)]
+#[builder(setter(into))]
+pub struct ParallelSshProps {
+    maximum_connections: usize,
+    agent_parallelism: usize,
+    timeout_socket: Duration,
+    timeout_ssh: Duration,
+}
+
 async fn process_host<A>(
     hostname: A,
     command: Arc<String>,
+    timeout_socket: Duration,
     agent_pool: Arc<Semaphore>,
     threads_limit: Arc<Semaphore>,
 ) -> Response
@@ -31,8 +44,14 @@ where
     A: ToSocketAddrs + Display + Sync + Clone + Send,
 {
     let start_time = Instant::now();
-    let result =
-        dbg!(process_host_inner(hostname.clone(), command, agent_pool, threads_limit).await);
+    let result = process_host_inner(
+        hostname.clone(),
+        timeout_socket,
+        command,
+        agent_pool,
+        threads_limit,
+    )
+    .await;
     let process_time = Instant::now() - start_time;
     let response = match result {
         Ok(a) => Response {
@@ -54,6 +73,7 @@ where
 
 async fn process_host_inner<A>(
     hostname: A,
+    timeout_socket: Duration,
     command: Arc<String>,
     agent_pool: Arc<Semaphore>,
     threads_pool: Arc<Semaphore>,
@@ -62,24 +82,29 @@ where
     A: ToSocketAddrs + Display + Sync + Clone + Send,
 {
     let _threads_guard = threads_pool.acquire().await;
-    let guard = agent_pool.acquire().await;
-    let sync_stream = TcpStream::connect(&hostname)?;
+    let address = &hostname
+        .to_socket_addrs()?
+        .next()
+        .ok_or(Error::msg("Failed converting address"))?;
+
+    let sync_stream = TcpStream::connect_timeout(&address, timeout_socket)?;
     let tcp = Async::new(sync_stream)?;
     let mut sess =
         Session::new().map_err(|_e| Error::msg(format!("Error initializing session")))?;
-    dbg!("Session initialized");
+    // dbg!("Session initialized");
     const TIMEOUT: u32 = 6000;
     sess.set_timeout(TIMEOUT);
     sess.set_tcp_stream(tcp)?;
     sess.handshake()
         .await
         .map_err(|e| Error::msg(format!("Failed establishing handshake: {}", e)))?;
-    dbg!("Handshake done");
+    // dbg!("Handshake done");
+    let guard = agent_pool.acquire().await;
     let mut agent = sess
         .agent()
         .map_err(|e| Error::msg(format!("Failed connecting to agent: {}", e)))?;
     agent.connect().await?;
-    dbg!("Agent connected");
+    // dbg!("Agent connected");
     sess.userauth_agent("scan")
         .await
         .map_err(|e| Error::msg(format!("Error connecting via agent: {}", e)))?;
@@ -88,7 +113,7 @@ where
         .channel_session()
         .await
         .map_err(|e| Error::msg(format!("Failed opening channel: {}", e)))?;
-    dbg!("Chanel opened");
+    // dbg!("Chanel opened");
     channel
         .exec(&command)
         .await
@@ -104,16 +129,13 @@ where
     Ok(channel_buffer)
 }
 
-pub struct ParallelSshProps {
-    maximum_connections: usize,
-    agent_parallelism: usize,
-}
-
 impl ParallelSshProps {
-    pub fn new(maximum_connections: usize, agent_parallelism: usize) -> Self {
+    pub fn new() -> Self {
         Self {
-            maximum_connections,
-            agent_parallelism,
+            maximum_connections: 1,
+            agent_parallelism: 1,
+            timeout_socket: Duration::new(1, 0),
+            timeout_ssh: Duration::from_secs(600),
         }
     }
 
@@ -127,7 +149,7 @@ impl ParallelSshProps {
     {
         let num_of_threads = Arc::new(Semaphore::new(self.maximum_connections));
         let futures = FuturesUnordered::new();
-        let agent_parallelizm = Arc::new(Semaphore::new(self.agent_parallelism));
+        let agent_parallelism = Arc::new(Semaphore::new(self.agent_parallelism));
         let command = Arc::new(command.to_string());
 
         for host in hosts {
@@ -135,7 +157,8 @@ impl ParallelSshProps {
             let process_result = process_host(
                 host,
                 command,
-                agent_parallelizm.clone(),
+                self.timeout_socket,
+                agent_parallelism.clone(),
                 num_of_threads.clone(),
             );
             futures.push(process_result);

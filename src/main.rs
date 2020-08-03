@@ -1,5 +1,5 @@
-use ansible_rs::ParallelSshProps;
 use ansible_rs::Response;
+use ansible_rs::{ParallelSshProps, ParallelSshPropsBuilder};
 use async_executor::Executor;
 use chrono::Utc;
 use clap::crate_version;
@@ -16,7 +16,7 @@ use std::io::prelude::*;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::process::exit;
-use std::time::UNIX_EPOCH;
+use std::time::Duration;
 
 fn hosts_builder(path: &Path) -> Vec<String> {
     let file = File::open(path).expect("Unable to open the file");
@@ -41,7 +41,8 @@ struct Config {
     threads: usize,
     agent_parallelism: usize,
     command: String,
-    timeout: u32,
+    timeout: u64,
+    connection_timeout: u64,
     output: OutputProps,
 }
 
@@ -65,23 +66,7 @@ impl Default for Config {
             command: String::default(),
             output: OutputProps::default(),
             timeout: 60,
-        }
-    }
-}
-
-fn get_config(path: &Path) -> Config {
-    let f = match fs::read_to_string(path) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("Failed reading config. Using default values : {}", e);
-            return Config::default();
-        }
-    };
-    match toml::from_str(f.as_str()) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("Error parsing config:{}", e);
-            Config::default()
+            connection_timeout: 100,
         }
     }
 }
@@ -159,7 +144,14 @@ fn main() {
     let hosts = hosts_builder(Path::new(&args.value_of("hosts").unwrap()));
     dbg!(&config);
 
-    let processor = ParallelSshProps::new(config.threads, config.agent_parallelism);
+    let processor = ParallelSshPropsBuilder::default()
+        .maximum_connections(config.threads)
+        .agent_parallelism(config.agent_parallelism)
+        .timeout_socket(Duration::from_millis(config.connection_timeout))
+        .timeout_ssh(Duration::from_secs(config.timeout))
+        .build()
+        .expect("Failed building ssh processor properties");
+
     let com = config.command.clone();
     let hosts_stream = processor.parallel_ssh_process(hosts, &com);
     smol::run(async { incremental_save(hosts_stream).await });
@@ -183,7 +175,7 @@ fn main() {
 fn progress_bar_creator(queue_len: u64) -> ProgressBar {
     let total_hosts_processed = ProgressBar::new(queue_len);
     let total_style = ProgressStyle::default_bar()
-        .template("{eta} {wide_bar} Hosts processed: {pos}/{len} Speed: {per_sec} {msg}")
+        .template("{eta_precise} {wide_bar} Hosts processed: {pos}/{len} Speed: {per_sec} {msg}")
         .progress_chars("##-");
     total_hosts_processed.set_style(total_style);
 
@@ -200,7 +192,7 @@ fn config_incremental_folders() -> File {
     }
     let incremental_name =
         PathBuf::from(store_dir_date.clone() + "/incremental_" + &filename + ".json");
-    let mut file = match File::create(&incremental_name) {
+    let file = match File::create(&incremental_name) {
         Ok(a) => a,
         Err(e) => {
             eprintln!(
@@ -216,14 +208,14 @@ fn config_incremental_folders() -> File {
 async fn incremental_save(
     stream: impl Future<Output = FuturesUnordered<impl Future<Output = Response>>>,
 ) {
+    let mut stream = stream.await;
     let mut file = config_incremental_folders();
-    //    let  total = progress_bar_creator(queue_len);
-    let total = ProgressBar::hidden();
-    let mut ok = 0;
-    let mut ko = 0;
+    let total = progress_bar_creator(stream.len() as u64);
+    // let total = ProgressBar::hidden();
+    let mut ok: i32 = 0;
+    let mut ko: i32 = 0;
     file.write_all(b"[\r\n")
         .expect("Writing for incremental saving failed");
-    let mut stream = stream.await;
     while let Some(received) = stream.next().await {
         if received.status {
             ok += 1
