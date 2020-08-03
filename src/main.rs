@@ -1,6 +1,7 @@
 use ansible_rs::ParallelSshProps;
 use ansible_rs::Response;
 use async_executor::Executor;
+use chrono::Utc;
 use clap::crate_version;
 use clap::{App, Arg};
 use color_backtrace;
@@ -13,7 +14,7 @@ use std::fs;
 use std::fs::File;
 use std::io::prelude::*;
 use std::io::BufReader;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::exit;
 use std::time::UNIX_EPOCH;
 
@@ -38,7 +39,7 @@ struct OutputProps {
 #[derive(Deserialize, Debug, Clone, Serialize)]
 struct Config {
     threads: usize,
-    token_parallelize: usize,
+    agent_parallelism: usize,
     command: String,
     timeout: u32,
     output: OutputProps,
@@ -60,7 +61,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             threads: 10,
-            token_parallelize: 2,
+            agent_parallelism: 2,
             command: String::default(),
             output: OutputProps::default(),
             timeout: 60,
@@ -158,7 +159,7 @@ fn main() {
     let hosts = hosts_builder(Path::new(&args.value_of("hosts").unwrap()));
     dbg!(&config);
 
-    let processor = ParallelSshProps::new(10);
+    let processor = ParallelSshProps::new(config.threads, config.agent_parallelism);
     let com = config.command.clone();
     let hosts_stream = processor.parallel_ssh_process(hosts, &com);
     smol::run(async { incremental_save(hosts_stream).await });
@@ -189,24 +190,39 @@ fn progress_bar_creator(queue_len: u64) -> ProgressBar {
     total_hosts_processed
 }
 
+fn config_incremental_folders() -> File {
+    let datetime = Utc::now().format("%H_%M_%S").to_string();
+    let filename = format!("{}", &datetime);
+    let store_dir_date = Utc::today().format("%d_%B_%Y").to_string();
+    if !Path::new(&store_dir_date).exists() {
+        std::fs::create_dir(Path::new(&store_dir_date))
+            .expect("Failed creating dir for temporary save");
+    }
+    let incremental_name =
+        PathBuf::from(store_dir_date.clone() + "/incremental_" + &filename + ".json");
+    let mut file = match File::create(&incremental_name) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!(
+                "Creating {:#?} for incremental save failed : {}",
+                incremental_name, e
+            );
+            panic!("Failed saving");
+        }
+    };
+    file
+}
+
 async fn incremental_save(
     stream: impl Future<Output = FuturesUnordered<impl Future<Output = Response>>>,
 ) {
-    let mut file = match File::create(Path::new(filename)) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("incremental salving failed. : {}", e);
-            return;
-        }
-    };
+    let mut file = config_incremental_folders();
     //    let  total = progress_bar_creator(queue_len);
-    let _executor = Executor::new();
     let total = ProgressBar::hidden();
     let mut ok = 0;
     let mut ko = 0;
     file.write_all(b"[\r\n")
         .expect("Writing for incremental saving failed");
-
     let mut stream = stream.await;
     while let Some(received) = stream.next().await {
         if received.status {
