@@ -9,14 +9,12 @@ use std::fs::File;
 use std::io::prelude::*;
 use std::io::BufReader;
 use std::path::Path;
-use std::process::exit;
-use std::thread::spawn;
 
 use async_executor::Executor;
-use async_executor::LocalExecutor;
+
 use futures::stream::FuturesUnordered;
 use futures::{Future, StreamExt};
-use futures_channel::mpsc::{channel, Receiver, Sender};
+
 use std::time::UNIX_EPOCH;
 
 fn hosts_builder(path: &Path) -> Vec<String> {
@@ -160,9 +158,9 @@ fn main() {
     let processor = ParallelSshProps::new(10);
     let com = config.command.clone();
 
-    let mut hosts_stream = processor.parallel_ssh_process(hosts, &com);
+    let hosts_stream = processor.parallel_ssh_process(hosts, &com);
     smol::run(async {
-        incremental_save(hosts_stream, &props, queue_len, incremental_name.as_str())
+        incremental_save(hosts_stream, &props, queue_len, incremental_name.as_str()).await
     });
     match config.output.keep_incremental_data {
         Some(true) => {}
@@ -192,9 +190,9 @@ fn progress_bar_creator(queue_len: u64) -> ProgressBar {
 }
 
 async fn incremental_save(
-    mut stream: impl Future<Output = FuturesUnordered<impl Future<Output = Response>>>,
+    stream: impl Future<Output = FuturesUnordered<impl Future<Output = Response>>>,
     _props: &OutputProps,
-    queue_len: u64,
+    _queue_len: u64,
     filename: &str,
 ) {
     let mut file = match File::create(Path::new(filename)) {
@@ -205,7 +203,7 @@ async fn incremental_save(
         }
     };
     //    let  total = progress_bar_creator(queue_len);
-    let executor = Executor::new();
+    let _executor = Executor::new();
     let total = ProgressBar::hidden();
     let mut ok = 0;
     let mut ko = 0;
