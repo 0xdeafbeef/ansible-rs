@@ -1,21 +1,21 @@
 use ansible_rs::Response;
-use ansible_rs::{ParallelSshProps, ParallelSshPropsBuilder};
-use async_executor::Executor;
+use ansible_rs::{ParallelSshPropsBuilder};
+
 use chrono::Utc;
 use clap::crate_version;
 use clap::{App, Arg};
 use color_backtrace;
-use confy::load;
+
 use futures::stream::FuturesUnordered;
 use futures::{Future, StreamExt};
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
-use std::fs;
+
 use std::fs::File;
 use std::io::prelude::*;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
-use std::process::exit;
+
 use std::time::Duration;
 
 fn hosts_builder(path: &Path) -> Vec<String> {

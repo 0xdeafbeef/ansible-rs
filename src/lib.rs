@@ -4,10 +4,9 @@ use futures::prelude::*;
 use futures::stream::FuturesUnordered;
 use futures::Future;
 use serde::Serialize;
+use smol::reader;
 use smol::Async;
-use smol::{blocking, reader};
 use std::fmt::Display;
-use std::io::Read;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -140,7 +139,7 @@ impl ParallelSshProps {
     }
 
     pub async fn parallel_ssh_process<A: 'static>(
-        self,
+        &self,
         hosts: Vec<A>,
         command: &str,
     ) -> FuturesUnordered<impl Future<Output = Response>>
