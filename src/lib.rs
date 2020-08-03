@@ -2,6 +2,8 @@ use anyhow::Error;
 use async_executor::{Executor, Spawner};
 use async_ssh2::Session;
 use futures::future::join_all;
+use futures::stream::FuturesUnordered;
+use futures::Future;
 use futures_channel::mpsc::{channel, Receiver, Sender};
 use serde::Serialize;
 use smol::Async;
@@ -11,6 +13,7 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
+
 #[derive(Serialize, Debug, Clone)]
 pub struct Response {
     pub result: String,
@@ -22,9 +25,9 @@ pub struct Response {
 async fn process_host<A>(
     hostname: A,
     command: Arc<String>,
-    mut tx: Sender<Response>,
     connection_pool: Arc<Semaphore>,
-) where
+) -> Response
+where
     A: ToSocketAddrs + Display + Sync + Clone + Send,
 {
     let start_time = Instant::now();
@@ -44,9 +47,8 @@ async fn process_host<A>(
             status: false,
         },
     };
-    if let Err(e) = tx.start_send(response) {
-        eprintln!("Error sending result via channel: {}", e);
-    };
+
+    response
 }
 
 async fn process_host_inner<A>(
@@ -75,7 +77,7 @@ where
         .map_err(|e| Error::msg(format!("Failed connecting to agent: {}", e)))?;
     agent.connect().await?;
     dbg!("Agent connected");
-    // drop(guard); //todo test, that it really works
+    drop(guard); //todo test, that it really works
     let mut channel = sess
         .channel_session()
         .await
@@ -95,42 +97,31 @@ where
 
 pub struct ParallelSshProps {
     maximum_connections: usize,
-    tx: Sender<Response>,
 }
 
 impl ParallelSshProps {
-    pub fn new(max_connections: usize) -> (Receiver<Response>, ParallelSshProps) {
-        let (tx, rx) = channel(max_connections * 2);
-        (
-            rx,
-            Self {
-                maximum_connections: max_connections,
-                tx,
-            },
-        )
+    pub fn new(max_connections: usize) -> Self {
+        Self {
+            maximum_connections: max_connections,
+        }
     }
 
-    pub async fn parallel_ssh_process<A: 'static>(self, hosts: Vec<A>, command: &str)
+    pub async fn parallel_ssh_process<A: 'static>(
+        self,
+        hosts: Vec<A>,
+        command: &str,
+    ) -> FuturesUnordered<impl Future<Output = Response>>
     where
         A: Display + ToSocketAddrs + Send + Sync + Clone,
     {
-        let ex = Executor::new();
         let num_of_threads = Arc::new(Semaphore::new(self.maximum_connections));
-        ex.run(async {
-            let spawner = Spawner::current();
-            let tasks: Vec<_> = hosts
-                .into_iter()
-                .inspect(|a| println!("Hostname: {}", a))
-                .map(|host| {
-                    spawner.spawn(process_host(
-                        host,
-                        Arc::new(command.to_string()),
-                        self.tx.clone(),
-                        num_of_threads.clone(),
-                    ))
-                })
-                .collect();
-            join_all(tasks).await;
-        });
+        let futures = FuturesUnordered::new();
+        let command = Arc::new(command.to_string());
+        for host in hosts {
+            let command = command.clone();
+            let process_result = process_host(host, command, num_of_threads.clone());
+            futures.push(process_result);
+        }
+        futures
     }
 }

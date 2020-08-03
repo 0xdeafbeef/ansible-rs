@@ -12,7 +12,10 @@ use std::path::Path;
 use std::process::exit;
 use std::thread::spawn;
 
+use async_executor::Executor;
 use async_executor::LocalExecutor;
+use futures::stream::FuturesUnordered;
+use futures::{Future, StreamExt};
 use futures_channel::mpsc::{channel, Receiver, Sender};
 use std::time::UNIX_EPOCH;
 
@@ -153,15 +156,14 @@ fn main() {
         .to_string();
     let incremental_name = format!("incremental_{}.json", &datetime);
     let inc_for_closure = incremental_name.clone();
-    let (rx, processor) = ParallelSshProps::new(10);
-    spawn(move || incremental_save(rx, &props, queue_len, incremental_name.as_str()));
-    let local_ex = LocalExecutor::new();
-    local_ex.run(async {
-        processor
-            .parallel_ssh_process(hosts, &config.command.clone())
-            .await;
-    });
 
+    let processor = ParallelSshProps::new(10);
+    let com = config.command.clone();
+
+    let mut hosts_stream = processor.parallel_ssh_process(hosts, &com);
+    smol::run(async {
+        incremental_save(hosts_stream, &props, queue_len, incremental_name.as_str())
+    });
     match config.output.keep_incremental_data {
         Some(true) => {}
         Some(false) => {
@@ -189,8 +191,8 @@ fn progress_bar_creator(queue_len: u64) -> ProgressBar {
     total_hosts_processed
 }
 
-fn incremental_save(
-    mut rx: Receiver<Response>,
+async fn incremental_save(
+    mut stream: impl Future<Output = FuturesUnordered<impl Future<Output = Response>>>,
     _props: &OutputProps,
     queue_len: u64,
     filename: &str,
@@ -202,23 +204,16 @@ fn incremental_save(
             return;
         }
     };
-    //    let total = progress_bar_creator(queue_len);
+    //    let  total = progress_bar_creator(queue_len);
+    let executor = Executor::new();
     let total = ProgressBar::hidden();
     let mut ok = 0;
     let mut ko = 0;
     file.write_all(b"[\r\n")
         .expect("Writing for incremental saving failed");
-    for _ in 0..=queue_len {
-        let received = match rx.try_next() {
-            Ok(a) => match a {
-                Some(a) => a,
-                None => continue,
-            },
-            Err(e) => {
-                eprintln!("Error receiving stats :{}", e);
-                exit(1);
-            }
-        };
+
+    let mut stream = stream.await;
+    while let Some(received) = stream.next().await {
         if received.status {
             ok += 1
         } else {
