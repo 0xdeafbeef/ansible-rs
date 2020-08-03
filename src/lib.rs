@@ -24,12 +24,37 @@ pub struct Response {
 }
 
 #[derive(Builder)]
-#[builder(setter(into))]
 pub struct ParallelSshProps {
-    maximum_connections: usize,
-    agent_parallelism: usize,
+    #[builder(setter(skip))]
+    maximum_connections: Arc<Semaphore>,
+    #[builder(setter(skip))]
+    agent_parallelism: Arc<Semaphore>,
     timeout_socket: Duration,
     timeout_ssh: Duration,
+}
+
+impl Default for ParallelSshProps {
+    fn default() -> Self {
+        Self {
+            maximum_connections: Arc::new(Semaphore::new(100)),
+            agent_parallelism: Arc::new(Semaphore::new(3)),
+            timeout_socket: Duration::from_millis(200),
+            timeout_ssh: Duration::from_secs(120),
+        }
+    }
+}
+
+impl ParallelSshPropsBuilder {
+    fn maximum_connections(&mut self, a: usize) -> &mut Self {
+        let mut new = self;
+        new.maximum_connections = Arc::new(Semaphore::new(a));
+        new
+    }
+    fn agent_parallelism(&mut self, a: usize) -> &mut Self {
+        let mut new = self;
+        new.agent_parallelism = Arc::new(Semaphore::new(a));
+        new
+    }
 }
 
 async fn process_host<A>(
@@ -52,7 +77,7 @@ where
     )
     .await;
     let process_time = Instant::now() - start_time;
-    let response = match result {
+    match result {
         Ok(a) => Response {
             result: a,
             hostname: hostname.to_string(),
@@ -65,9 +90,7 @@ where
             process_time,
             status: false,
         },
-    };
-
-    response
+    }
 }
 
 async fn process_host_inner<A>(
@@ -84,12 +107,12 @@ where
     let address = &hostname
         .to_socket_addrs()?
         .next()
-        .ok_or(Error::msg("Failed converting address"))?;
+        .ok_or_else(|| Error::msg("Failed converting address"))?;
 
     let sync_stream = TcpStream::connect_timeout(&address, timeout_socket)?;
     let tcp = Async::new(sync_stream)?;
     let mut sess =
-        Session::new().map_err(|_e| Error::msg(format!("Error initializing session")))?;
+        Session::new().map_err(|_e| Error::msg("Error initializing session".to_string()))?;
     // dbg!("Session initialized");
     const TIMEOUT: u32 = 6000;
     sess.set_timeout(TIMEOUT);
@@ -130,12 +153,7 @@ where
 
 impl ParallelSshProps {
     pub fn new() -> Self {
-        Self {
-            maximum_connections: 1,
-            agent_parallelism: 1,
-            timeout_socket: Duration::new(1, 0),
-            timeout_ssh: Duration::from_secs(600),
-        }
+        Self::default()
     }
 
     pub async fn parallel_ssh_process<A: 'static>(
@@ -146,9 +164,7 @@ impl ParallelSshProps {
     where
         A: Display + ToSocketAddrs + Send + Sync + Clone,
     {
-        let num_of_threads = Arc::new(Semaphore::new(self.maximum_connections));
         let futures = FuturesUnordered::new();
-        let agent_parallelism = Arc::new(Semaphore::new(self.agent_parallelism));
         let command = Arc::new(command.to_string());
 
         for host in hosts {
@@ -157,8 +173,8 @@ impl ParallelSshProps {
                 host,
                 command,
                 self.timeout_socket,
-                agent_parallelism.clone(),
-                num_of_threads.clone(),
+                self.agent_parallelism.clone(),
+                self.num_of_threads.clone(),
             );
             futures.push(process_result);
         }
