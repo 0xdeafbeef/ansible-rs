@@ -24,13 +24,15 @@ pub struct Response {
 async fn process_host<A>(
     hostname: A,
     command: Arc<String>,
-    connection_pool: Arc<Semaphore>,
+    agent_pool: Arc<Semaphore>,
+    threads_limit: Arc<Semaphore>,
 ) -> Response
 where
     A: ToSocketAddrs + Display + Sync + Clone + Send,
 {
     let start_time = Instant::now();
-    let result = dbg!(process_host_inner(hostname.clone(), command, connection_pool).await);
+    let result =
+        dbg!(process_host_inner(hostname.clone(), command, agent_pool, threads_limit).await);
     let process_time = Instant::now() - start_time;
     let response = match result {
         Ok(a) => Response {
@@ -53,12 +55,14 @@ where
 async fn process_host_inner<A>(
     hostname: A,
     command: Arc<String>,
-    connection_pool: Arc<Semaphore>,
+    agent_pool: Arc<Semaphore>,
+    threads_pool: Arc<Semaphore>,
 ) -> Result<String, Error>
 where
     A: ToSocketAddrs + Display + Sync + Clone + Send,
 {
-    let guard = connection_pool.acquire().await;
+    let _threads_guard = threads_pool.acquire().await;
+    let guard = agent_pool.acquire().await;
     let sync_stream = TcpStream::connect(&hostname)?;
     let tcp = Async::new(sync_stream)?;
     let mut sess =
@@ -93,20 +97,23 @@ where
     // let mut command_stdout = reader(channel.stream(0));
     let mut reader = reader(channel.stream(0));
     let mut channel_buffer = String::with_capacity(4096);
-        reader
-        .read_to_string(&mut channel_buffer).await
+    reader
+        .read_to_string(&mut channel_buffer)
+        .await
         .map_err(|e| Error::msg(format!("Error reading result of work: {}", e)))?;
     Ok(channel_buffer)
 }
 
 pub struct ParallelSshProps {
     maximum_connections: usize,
+    agent_parallelism: usize,
 }
 
 impl ParallelSshProps {
-    pub fn new(max_connections: usize) -> Self {
+    pub fn new(maximum_connections: usize, agent_parallelism: usize) -> Self {
         Self {
-            maximum_connections: max_connections,
+            maximum_connections,
+            agent_parallelism,
         }
     }
 
@@ -120,10 +127,17 @@ impl ParallelSshProps {
     {
         let num_of_threads = Arc::new(Semaphore::new(self.maximum_connections));
         let futures = FuturesUnordered::new();
+        let agent_parallelizm = Arc::new(Semaphore::new(self.agent_parallelism));
         let command = Arc::new(command.to_string());
+
         for host in hosts {
             let command = command.clone();
-            let process_result = process_host(host, command, num_of_threads.clone());
+            let process_result = process_host(
+                host,
+                command,
+                agent_parallelizm.clone(),
+                num_of_threads.clone(),
+            );
             futures.push(process_result);
         }
         futures

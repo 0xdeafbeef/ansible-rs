@@ -1,20 +1,20 @@
 use ansible_rs::ParallelSshProps;
 use ansible_rs::Response;
+use async_executor::Executor;
+use clap::crate_version;
 use clap::{App, Arg};
 use color_backtrace;
+use confy::load;
+use futures::stream::FuturesUnordered;
+use futures::{Future, StreamExt};
 use indicatif::{ProgressBar, ProgressStyle};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::fs::File;
 use std::io::prelude::*;
 use std::io::BufReader;
 use std::path::Path;
-
-use async_executor::Executor;
-
-use futures::stream::FuturesUnordered;
-use futures::{Future, StreamExt};
-
+use std::process::exit;
 use std::time::UNIX_EPOCH;
 
 fn hosts_builder(path: &Path) -> Vec<String> {
@@ -26,7 +26,7 @@ fn hosts_builder(path: &Path) -> Vec<String> {
         .collect::<Vec<String>>()
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, Serialize)]
 struct OutputProps {
     save_to_file: bool,
     filename: Option<String>,
@@ -35,12 +35,13 @@ struct OutputProps {
     keep_incremental_data: Option<bool>,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, Serialize)]
 struct Config {
     threads: usize,
-    output: OutputProps,
+    token_parallelize: usize,
     command: String,
     timeout: u32,
+    output: OutputProps,
 }
 
 impl Default for OutputProps {
@@ -59,6 +60,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             threads: 10,
+            token_parallelize: 2,
             command: String::default(),
             output: OutputProps::default(),
             timeout: 60,
@@ -124,12 +126,13 @@ fn save_to_console(conf: &Config, data: &Vec<Response>) {
 
 fn main() {
     color_backtrace::install();
-    let args = App::new("SSH analyzer")
+    let args = App::new("ansible-rs")
+        .version(crate_version!())
         .arg(
             Arg::with_name("config")
                 .short("c")
                 .long("config")
-                .help("Path to config file")
+                .help("Path to hosts file")
                 .required(false)
                 .takes_value(true)
                 .default_value("config.toml"),
@@ -141,42 +144,39 @@ fn main() {
                 .required(true)
                 .takes_value(true),
         )
+        .arg(
+            Arg::with_name("hosts_format")
+                .short("f")
+                .long("format")
+                .takes_value(true)
+                .help("Hosts format")
+                .long_help("Hosts format: csv for key value and empty(default) for list")
+                .default_value(""),
+        )
         .get_matches();
+    let config: Config = confy::load_path("./confy_new.toml").unwrap();
     let hosts = hosts_builder(Path::new(&args.value_of("hosts").unwrap()));
-    let config = get_config(Path::new(&args.value_of("config").unwrap()));
     dbg!(&config);
-    let props = config.output.clone();
-    let queue_len = hosts.len() as u64;
-    let datetime = std::time::SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        .to_string();
-    let incremental_name = format!("incremental_{}.json", &datetime);
-    let inc_for_closure = incremental_name.clone();
 
     let processor = ParallelSshProps::new(10);
     let com = config.command.clone();
-
     let hosts_stream = processor.parallel_ssh_process(hosts, &com);
-    smol::run(async {
-        incremental_save(hosts_stream, &props, queue_len, incremental_name.as_str()).await
-    });
-    match config.output.keep_incremental_data {
-        Some(true) => {}
-        Some(false) => {
-            match std::fs::remove_file(Path::new(&inc_for_closure)) {
-                Ok(_) => (),
-                Err(e) => eprintln!("Error removing temp file : {}", e),
-            };
-        }
-        None => {
-            match std::fs::remove_file(Path::new(&inc_for_closure)) {
-                Ok(_) => (),
-                Err(e) => eprintln!("Error removing temp file : {}", e),
-            };
-        }
-    };
+    smol::run(async { incremental_save(hosts_stream).await });
+    // match config.output.keep_incremental_data {
+    //     Some(true) => {}
+    //     Some(false) => {
+    //         match std::fs::remove_file(Path::new(&inc_for_closure)) {
+    //             Ok(_) => (),
+    //             Err(e) => eprintln!("Error removing temp file : {}", e),
+    //         };
+    //     }
+    //     None => {
+    //         match std::fs::remove_file(Path::new(&inc_for_closure)) {
+    //             Ok(_) => (),
+    //             Err(e) => eprintln!("Error removing temp file : {}", e),
+    //         };
+    //     }
+    // };
 }
 
 fn progress_bar_creator(queue_len: u64) -> ProgressBar {
@@ -191,9 +191,6 @@ fn progress_bar_creator(queue_len: u64) -> ProgressBar {
 
 async fn incremental_save(
     stream: impl Future<Output = FuturesUnordered<impl Future<Output = Response>>>,
-    _props: &OutputProps,
-    _queue_len: u64,
-    filename: &str,
 ) {
     let mut file = match File::create(Path::new(filename)) {
         Ok(a) => a,
