@@ -1,12 +1,11 @@
 use anyhow::Error;
-
 use async_ssh2::Session;
-
+use futures::prelude::*;
 use futures::stream::FuturesUnordered;
 use futures::Future;
-
 use serde::Serialize;
 use smol::Async;
+use smol::{blocking, reader};
 use std::fmt::Display;
 use std::io::Read;
 use std::net::{TcpStream, ToSocketAddrs};
@@ -77,20 +76,25 @@ where
         .map_err(|e| Error::msg(format!("Failed connecting to agent: {}", e)))?;
     agent.connect().await?;
     dbg!("Agent connected");
+    sess.userauth_agent("scan")
+        .await
+        .map_err(|e| Error::msg(format!("Error connecting via agent: {}", e)))?;
     drop(guard); //todo test, that it really works
     let mut channel = sess
         .channel_session()
         .await
-        .map_err(|e| Error::msg(format!("Failed openning channel: {}", e)))?;
+        .map_err(|e| Error::msg(format!("Failed opening channel: {}", e)))?;
     dbg!("Chanel opened");
     channel
         .exec(&command)
         .await
         .map_err(|e| Error::msg(format!("Failed executing command in channel: {}", e)))?;
+
+    // let mut command_stdout = reader(channel.stream(0));
+    let mut reader = reader(channel.stream(0));
     let mut channel_buffer = String::with_capacity(4096);
-    channel
-        .stream(1)
-        .read_to_string(&mut channel_buffer)
+        reader
+        .read_to_string(&mut channel_buffer).await
         .map_err(|e| Error::msg(format!("Error reading result of work: {}", e)))?;
     Ok(channel_buffer)
 }
