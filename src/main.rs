@@ -1,10 +1,9 @@
+use ansible_rs::{ParallelSshProps, ParallelSshPropsBuilder};
 use ansible_rs::Response;
-use ansible_rs::{ParallelSshPropsBuilder};
 
 use chrono::Utc;
 use clap::crate_version;
 use clap::{App, Arg};
-use color_backtrace;
 
 use futures::stream::FuturesUnordered;
 use futures::{Future, StreamExt};
@@ -102,7 +101,7 @@ fn save_to_file(conf: &Config, data: Vec<Response>) {
     }
 }
 
-fn save_to_console(conf: &Config, data: &Vec<Response>) {
+fn save_to_console(conf: &Config, data: &[Response]) {
     if conf.output.pretty_format {
         println!("{}", serde_json::to_string_pretty(&data).unwrap())
     } else {
@@ -152,7 +151,7 @@ fn main() {
         .build()
         .expect("Failed building ssh processor properties");
 
-    let com = config.command.clone();
+    let com = config.command;
     let hosts_stream = processor.parallel_ssh_process(hosts, &com);
     smol::run(async { incremental_save(hosts_stream).await });
     // match config.output.keep_incremental_data {
@@ -184,25 +183,14 @@ fn progress_bar_creator(queue_len: u64) -> ProgressBar {
 
 fn config_incremental_folders() -> File {
     let datetime = Utc::now().format("%H_%M_%S").to_string();
-    let filename = format!("{}", &datetime);
+    let filename = &datetime;
     let store_dir_date = Utc::today().format("%d_%B_%Y").to_string();
     if !Path::new(&store_dir_date).exists() {
         std::fs::create_dir(Path::new(&store_dir_date))
             .expect("Failed creating dir for temporary save");
     }
-    let incremental_name =
-        PathBuf::from(store_dir_date.clone() + "/incremental_" + &filename + ".json");
-    let file = match File::create(&incremental_name) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!(
-                "Creating {:#?} for incremental save failed : {}",
-                incremental_name, e
-            );
-            panic!("Failed saving");
-        }
-    };
-    file
+    let incremental_name = PathBuf::from(store_dir_date + "/incremental_" + &filename + ".json");
+    File::create(incremental_name).expect("incremental salving failed.")
 }
 
 async fn incremental_save(

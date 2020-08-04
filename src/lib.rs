@@ -23,11 +23,9 @@ pub struct Response {
     pub status: bool,
 }
 
-#[derive(Builder)]
+
 pub struct ParallelSshProps {
-    #[builder(setter(skip))]
     maximum_connections: Arc<Semaphore>,
-    #[builder(setter(skip))]
     agent_parallelism: Arc<Semaphore>,
     timeout_socket: Duration,
     timeout_ssh: Duration,
@@ -44,17 +42,59 @@ impl Default for ParallelSshProps {
     }
 }
 
+impl Default for ParallelSshPropsBuilder {
+    fn default() -> Self {
+        Self {
+            maximum_connections: Some(Arc::new(Semaphore::new(100))),
+            agent_parallelism: Some(Arc::new(Semaphore::new(3))),
+            timeout_socket: Some(Duration::from_millis(200)),
+            timeout_ssh: Some(Duration::from_secs(120)),
+        }
+    }
+}
+
 impl ParallelSshPropsBuilder {
-    fn maximum_connections(&mut self, a: usize) -> &mut Self {
+    pub fn maximum_connections(&mut self, a: usize) -> &mut Self {
         let mut new = self;
-        new.maximum_connections = Arc::new(Semaphore::new(a));
+        new.maximum_connections = Some(Arc::new(Semaphore::new(a)));
         new
     }
-    fn agent_parallelism(&mut self, a: usize) -> &mut Self {
+    pub fn agent_parallelism(&mut self, a: usize) -> &mut Self {
         let mut new = self;
-        new.agent_parallelism = Arc::new(Semaphore::new(a));
+        new.agent_parallelism = Some(Arc::new(Semaphore::new(a)));
         new
     }
+    pub fn timeout_socket(&mut self, a: Duration) -> &mut Self
+    {
+        let mut new = self;
+        new.timeout_socket = Some(a);
+        new
+    }
+    pub fn timeout_ssh(&mut self, a: Duration) -> &mut Self
+    {
+        let mut new = self;
+        new.timeout_ssh = Some(a);
+        new
+    }
+    pub fn build(&self) -> Result<ParallelSshProps, String>
+    {
+        Ok(
+            ParallelSshProps {
+                timeout_ssh: *self.timeout_ssh.clone().as_ref().ok_or("timeout_ssh must be initialized")?,
+                timeout_socket: *self.timeout_socket.clone().as_ref().ok_or("timeout_socket must be initialized")?,
+                maximum_connections: self.maximum_connections.clone().ok_or("maximum_connections must be initialized")?,
+                agent_parallelism: self.agent_parallelism.clone().ok_or("agent_parallelism must be initialized")?,
+            }
+        )
+    }
+}
+
+#[derive(Clone)]
+pub struct ParallelSshPropsBuilder {
+    maximum_connections: Option<Arc<Semaphore>>,
+    agent_parallelism: Option<Arc<Semaphore>>,
+    timeout_socket: Option<Duration>,
+    timeout_ssh: Option<Duration>,
 }
 
 async fn process_host<A>(
@@ -64,8 +104,8 @@ async fn process_host<A>(
     agent_pool: Arc<Semaphore>,
     threads_limit: Arc<Semaphore>,
 ) -> Response
-where
-    A: ToSocketAddrs + Display + Sync + Clone + Send,
+    where
+        A: ToSocketAddrs + Display + Sync + Clone + Send,
 {
     let start_time = Instant::now();
     let result = process_host_inner(
@@ -75,7 +115,7 @@ where
         agent_pool,
         threads_limit,
     )
-    .await;
+        .await;
     let process_time = Instant::now() - start_time;
     match result {
         Ok(a) => Response {
@@ -100,8 +140,8 @@ async fn process_host_inner<A>(
     agent_pool: Arc<Semaphore>,
     threads_pool: Arc<Semaphore>,
 ) -> Result<String, Error>
-where
-    A: ToSocketAddrs + Display + Sync + Clone + Send,
+    where
+        A: ToSocketAddrs + Display + Sync + Clone + Send,
 {
     let _threads_guard = threads_pool.acquire().await;
     let address = &hostname
@@ -160,9 +200,9 @@ impl ParallelSshProps {
         &self,
         hosts: Vec<A>,
         command: &str,
-    ) -> FuturesUnordered<impl Future<Output = Response>>
-    where
-        A: Display + ToSocketAddrs + Send + Sync + Clone,
+    ) -> FuturesUnordered<impl Future<Output=Response>>
+        where
+            A: Display + ToSocketAddrs + Send + Sync + Clone,
     {
         let futures = FuturesUnordered::new();
         let command = Arc::new(command.to_string());
@@ -174,7 +214,7 @@ impl ParallelSshProps {
                 command,
                 self.timeout_socket,
                 self.agent_parallelism.clone(),
-                self.num_of_threads.clone(),
+                self.maximum_connections.clone(),
             );
             futures.push(process_result);
         }
