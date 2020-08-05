@@ -19,8 +19,9 @@ indicatif = { version = "0.13.0" }
 color-backtrace = "0.3.0"
 #crossterm = "0.14"
 #tui = { version = "0.8", default-features = false, features = ['crossterm'] }
-async-ssh2 = {git="https://github.com/0xdeafbeef/async-ssh2.git"}
-smol = { version = "0.1", features = ["tokio02"] }
+async-ssh2 = {git="https://github.com/0xdeafbeef/async-ssh2.git", rev='2127c94'}
+smol = { version = "0.3", features = ["tokio02"] }
+blocking = "0.5.0"
 num_cpus = "1.0"
 futures = "0.3.1"
 tokio-trace = "0.1.0"
@@ -29,3 +30,5 @@ anyhow = "1.0.32"
 async-executor = "0.1.2"
 futures-channel = "0.3.5"
 confy = "0.4.0"
+chrono = "0.4.13"
+async-io="0.1.9"

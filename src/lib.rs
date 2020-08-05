@@ -4,16 +4,14 @@ use futures::prelude::*;
 use futures::stream::FuturesUnordered;
 use futures::Future;
 use serde::Serialize;
-use smol::reader;
-use smol::Async;
+
+// use smol::Async;
 use std::fmt::Display;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
-
-#[macro_use]
-extern crate derive_builder;
+use async_io::Async;
 
 #[derive(Serialize, Debug, Clone)]
 pub struct Response {
@@ -23,7 +21,7 @@ pub struct Response {
     pub status: bool,
 }
 
-
+#[derive(Debug)]
 pub struct ParallelSshProps {
     maximum_connections: Arc<Semaphore>,
     agent_parallelism: Arc<Semaphore>,
@@ -117,6 +115,7 @@ async fn process_host<A>(
     )
         .await;
     let process_time = Instant::now() - start_time;
+    println!("Exiting  {}",&hostname);
     match result {
         Ok(a) => Response {
             result: a,
@@ -131,6 +130,7 @@ async fn process_host<A>(
             status: false,
         },
     }
+
 }
 
 async fn process_host_inner<A>(
@@ -143,17 +143,20 @@ async fn process_host_inner<A>(
     where
         A: ToSocketAddrs + Display + Sync + Clone + Send,
 {
+    println!("Entered process_host_inner for {}",&hostname);
     let _threads_guard = threads_pool.acquire().await;
+    println!("Permits: {}", threads_pool.available_permits());
+    println!("Thread pool acquired for {}",&hostname);
     let address = &hostname
         .to_socket_addrs()?
         .next()
         .ok_or_else(|| Error::msg("Failed converting address"))?;
-
-    let sync_stream = TcpStream::connect_timeout(&address, timeout_socket)?;
-    let tcp = Async::new(sync_stream)?;
+    // // let sync_stream = TcpStream::connect_timeout(&address, timeout_socket)?;
+    println!("Sync stream created {}",&hostname);
+    let tcp =Async::<TcpStream>::connect(*address).await?;
     let mut sess =
         Session::new().map_err(|_e| Error::msg("Error initializing session".to_string()))?;
-    // dbg!("Session initialized");
+    println!("Session established {}",&hostname);
     const TIMEOUT: u32 = 6000;
     sess.set_timeout(TIMEOUT);
     sess.set_tcp_stream(tcp)?;
@@ -162,6 +165,7 @@ async fn process_host_inner<A>(
         .map_err(|e| Error::msg(format!("Failed establishing handshake: {}", e)))?;
     // dbg!("Handshake done");
     let guard = agent_pool.acquire().await;
+    println!("Permits: {}", agent_pool.available_permits());
     let mut agent = sess
         .agent()
         .map_err(|e| Error::msg(format!("Failed connecting to agent: {}", e)))?;
@@ -182,7 +186,7 @@ async fn process_host_inner<A>(
         .map_err(|e| Error::msg(format!("Failed executing command in channel: {}", e)))?;
 
     // let mut command_stdout = reader(channel.stream(0));
-    let mut reader = reader(channel.stream(0));
+    let mut reader = blocking::Unblock::new( channel.stream(0));
     let mut channel_buffer = String::with_capacity(4096);
     reader
         .read_to_string(&mut channel_buffer)
@@ -206,7 +210,7 @@ impl ParallelSshProps {
     {
         let futures = FuturesUnordered::new();
         let command = Arc::new(command.to_string());
-
+        dbg!(&self);
         for host in hosts {
             let command = command.clone();
             let process_result = process_host(

@@ -1,12 +1,12 @@
 use ansible_rs::{ParallelSshProps, ParallelSshPropsBuilder};
 use ansible_rs::Response;
-
+use blocking::unblock;
 use chrono::Utc;
 use clap::crate_version;
 use clap::{App, Arg};
 
 use futures::stream::FuturesUnordered;
-use futures::{Future, StreamExt};
+use futures::{Future, StreamExt, AsyncWriteExt};
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
 
@@ -144,8 +144,8 @@ fn main() {
     dbg!(&config);
 
     let processor = ParallelSshPropsBuilder::default()
-        .maximum_connections(config.threads)
-        .agent_parallelism(config.agent_parallelism)
+        .maximum_connections(500)
+        .agent_parallelism(6)
         .timeout_socket(Duration::from_millis(config.connection_timeout))
         .timeout_ssh(Duration::from_secs(config.timeout))
         .build()
@@ -197,12 +197,14 @@ async fn incremental_save(
     stream: impl Future<Output = FuturesUnordered<impl Future<Output = Response>>>,
 ) {
     let mut stream = stream.await;
-    let mut file = config_incremental_folders();
+    let mut file =  blocking::Unblock::new ( config_incremental_folders());
     let total = progress_bar_creator(stream.len() as u64);
     // let total = ProgressBar::hidden();
     let mut ok: i32 = 0;
     let mut ko: i32 = 0;
-    file.write_all(b"[\r\n")
+    file.
+        write_all(b"[\r\n")
+        .await
         .expect("Writing for incremental saving failed");
     while let Some(received) = stream.next().await {
         if received.status {
@@ -215,8 +217,10 @@ async fn incremental_save(
         let mut data = serde_json::to_string_pretty(&received).unwrap();
         data += ",\n";
         file.write_all(data.as_bytes())
+            .await
             .expect("Writing for incremental saving failed");
     }
     file.write_all(b"\n]")
+        .await
         .expect("Writing for incremental saving failed");
 }
