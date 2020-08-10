@@ -1,20 +1,18 @@
 use anyhow::Error;
-use std::thread;
 use async_channel::{unbounded, Receiver, Sender};
-use async_ssh2::Session;
+use async_ssh2_lite::{AsyncSession, SessionConfiguration};
 use futures::prelude::*;
 use futures::stream::FuturesUnordered;
 use serde::Serialize;
 use smol::future::FutureExt;
 use smol::io;
+use std::thread;
 use tracing::{event, instrument, Level};
-// use smol::Async;
 use async_io::{Async, Timer};
 use std::fmt::{Debug, Display};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-
 use tokio::macros::support::Pin;
 use tokio::sync::Semaphore;
 
@@ -116,16 +114,14 @@ async fn process_host<A>(
 ) where
     A: ToSocketAddrs + Display + Sync + Clone + Send + Debug,
 {
-    // event!(Level::INFO, "inside process host");
     let start_time = Instant::now();
-    let result = process_host_inner(hostname.clone(), command, agent_pool, threads_limit)
-        //     .or(async {
-        //     Timer::new(Duration::from_secs(60)).await;
-        //         Err( Error::msg("Timed out waiting for ssh-related operations"))
-        // })
+    let result = process_host_inner(hostname.clone(), command, agent_pool.clone(), threads_limit)
+        .or(async {
+            Timer::new(Duration::from_secs(60)).await;
+            Err(Error::msg("Timed out waiting for ssh-related operations"))
+        })
         .await;
     let process_time = Instant::now() - start_time;
-    // println!("Exiting  {}",&hostname);
     let res = match result {
         Ok(a) => Response {
             result: a,
@@ -142,8 +138,14 @@ async fn process_host<A>(
     };
     if let Err(e) = tx.send(res).await {
         eprintln!("Error sending to channel: {}", e)
-    };
-    event!(Level::INFO, "processed :{}, id: {:#?}", hostname,thread::current().id());
+    }
+    event!(
+        Level::INFO,
+        "processed :{}, id: {:#?}\nAGENT: {}\n",
+        hostname,
+        thread::current().id(),
+        agent_pool.available_permits()
+    );
 }
 
 async fn process_host_inner<A>(
@@ -155,58 +157,42 @@ async fn process_host_inner<A>(
 where
     A: ToSocketAddrs + Display + Sync + Clone + Send + Debug,
 {
-    // println!("Entered process_host_inner for {}",&hostname);
     let _threads_guard = threads_pool.acquire().await;
-    // println!("Permits: {}", threads_pool.available_permits());
-    // println!("Thread pool acquired for {}",&hostname);
     let address = &hostname
         .to_socket_addrs()?
         .next()
         .ok_or_else(|| Error::msg("Failed converting address"))?;
-    // // let sync_stream = TcpStream::connect_timeout(&address, timeout_socket)?;
-    // println!("Sync stream created {}",&hostname);
     let tcp = Async::<TcpStream>::connect(*address)
         .or(async {
             Timer::new(Duration::from_millis(200)).await;
             Err(io::ErrorKind::TimedOut.into())
         })
         .await?;
-    let mut sess =
-        Session::new().map_err(|_e| Error::msg("Error initializing session".to_string()))?;
+    let mut config = SessionConfiguration::new();
+    const TIMEOUT: u32 = 60000;
+    config.set_timeout(TIMEOUT);
 
-    // println!("Session established {}",&hostname);
-    const TIMEOUT: u32 = 6000;
-    sess.set_timeout(TIMEOUT);
-    sess.set_tcp_stream(tcp)?;
+    let mut sess = AsyncSession::new(tcp, Some(config))
+        .map_err(|_e| Error::msg("Error initializing session".to_string()))?;
     sess.handshake()
         .await
         .map_err(|e| Error::msg(format!("Failed establishing handshake: {}", e)))?;
     // dbg!("Handshake done");
     let guard = agent_pool.acquire().await;
-    // println!("Permits: {}", agent_pool.available_permits());
-    let mut agent = sess
-        .agent()
-        .map_err(|e| Error::msg(format!("Failed connecting to agent: {}", e)))?;
-    agent.connect().await?;
-    // dbg!("Agent connected");
-    sess.userauth_agent("scan")
+    sess.userauth_agent_with_try_next("scan")
         .await
         .map_err(|e| Error::msg(format!("Error connecting via agent: {}", e)))?;
-    drop(guard); //todo test, that it really works
+
     let mut channel = sess
         .channel_session()
         .await
         .map_err(|e| Error::msg(format!("Failed opening channel: {}", e)))?;
-    // dbg!("Chanel opened");
     channel
         .exec(&command)
         .await
         .map_err(|e| Error::msg(format!("Failed executing command in channel: {}", e)))?;
-
-    // let mut command_stdout = reader(channel.stream(0));
-    let mut reader = blocking::Unblock::new(channel.stream(0));
     let mut channel_buffer = String::with_capacity(4096);
-    reader
+    channel
         .read_to_string(&mut channel_buffer)
         .await
         .map_err(|e| Error::msg(format!("Error reading result of work: {}", e)))?;

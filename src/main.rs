@@ -1,26 +1,26 @@
 use ansible_rs::Response;
 use ansible_rs::{ParallelSshProps, ParallelSshPropsBuilder};
-use blocking::unblock;
 use chrono::Utc;
 use clap::crate_version;
 use clap::{App, Arg};
-use futures::stream::FuturesUnordered;
-use futures::{AsyncWriteExt, Future, StreamExt};
+use futures::{
+    AsyncWriteExt,
+    Future,
+    StreamExt
+};
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
-use tracing::info;
+
 use tracing_subscriber;
 
 use std::fs::File;
 use std::io::prelude::*;
-use std::io::{BufReader, LineWriter};
+use std::io::{BufReader};
 use std::path::{Path, PathBuf};
 
 use async_channel::Receiver;
 use async_executor::{Executor, Spawner, Task};
-use smol::io::BufWriter;
 use std::pin::Pin;
-use std::thread::sleep;
 use std::time::Duration;
 use tokio_trace::level_filters::LevelFilter;
 
@@ -118,9 +118,9 @@ fn save_to_console(conf: &Config, data: &[Response]) {
 
 fn main() {
     color_backtrace::install();
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::TRACE)
-        .init();
+    // tracing_subscriber::fmt()
+    //     .with_max_level(tracing::Level::TRACE)
+    //     .init();
     let args = App::new("ansible-rs")
         .version(crate_version!())
         .arg(
@@ -154,8 +154,8 @@ fn main() {
     dbg!(&config);
 
     let (rx, processor) = ParallelSshPropsBuilder::default()
-        .maximum_connections(10)
-        .agent_parallelism(2)
+        .maximum_connections(config.threads)
+        .agent_parallelism(config.agent_parallelism)
         .timeout_socket(Duration::from_millis(config.connection_timeout))
         .timeout_ssh(Duration::from_secs(config.timeout))
         .build()
@@ -209,40 +209,39 @@ fn incremental_save(
 ) {
     // println!("here");
     let mut file = blocking::Unblock::new(config_incremental_folders());
-    let mut file = BufWriter::new(file);
-    let ex = Executor::new();
-    // let total = progress_bar_creator(stream.len() as u64);
-    ex.run(async {
+    let total = progress_bar_creator(stream.len() as u64);
+    let len = stream.len();
+    smol::run(async {
         for fut in stream {
             Task::spawn(fut).detach();
         }
-        println!("Spawned");
-        // let total = ProgressBar::hidden();
         let mut ok: i32 = 0;
         let mut ko: i32 = 0;
         let mut token_fail: i32 = 0;
         file.write_all(b"[\r\n")
             .await
             .expect("Writing for incremental saving failed");
-        while let Ok(received) = rx.recv().await {
-            if received.status {
-                ok += 1
-            } else {
-                ko += 1;
-                if received.result.contains("[-19]") {
-                    token_fail += 1;
-                }
-            };
-            // total.inc(1);
-            // total.set_message(&format!(
-            //     "OK: {}, Failed: {}, Token: {}",
-            //     ok, ko, token_fail
-            // ));
-            let mut data = serde_json::to_string_pretty(&received).unwrap();
-            data += ",\n";
-            file.write_all(data.as_bytes())
-                .await
-                .expect("Writing for incremental saving failed");
+        for _ in 0..len {
+            if let Ok(received) = rx.recv().await {
+                if received.status {
+                    ok += 1
+                } else {
+                    ko += 1;
+                    if received.result.contains("[-19]") {
+                        token_fail += 1;
+                    }
+                };
+                total.inc(1);
+                total.set_message(&format!(
+                    "OK: {}, Failed: {}, Token: {}",
+                    ok, ko, token_fail
+                ));
+                let mut data = serde_json::to_string_pretty(&received).unwrap();
+                data += ",\n";
+                file.write_all(data.as_bytes())
+                    .await
+                    .expect("Writing for incremental saving failed");
+            }
         }
         file.write_all(b"\n]")
             .await
