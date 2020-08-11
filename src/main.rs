@@ -1,28 +1,24 @@
 use ansible_rs::Response;
-use ansible_rs::{ParallelSshProps, ParallelSshPropsBuilder};
+use ansible_rs::{ParallelSshPropsBuilder};
 use chrono::Utc;
 use clap::crate_version;
 use clap::{App, Arg};
-use futures::{
-    AsyncWriteExt,
-    Future,
-    StreamExt
-};
+use futures::{AsyncWriteExt, Future, StreamExt};
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
 
-use tracing_subscriber;
+
 
 use std::fs::File;
 use std::io::prelude::*;
-use std::io::{BufReader};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
 use async_channel::Receiver;
-use async_executor::{Executor, Spawner, Task};
+use async_executor::{Task};
 use std::pin::Pin;
 use std::time::Duration;
-use tokio_trace::level_filters::LevelFilter;
+
 
 fn hosts_builder(path: &Path) -> Vec<String> {
     let file = File::open(path).expect("Unable to open the file");
@@ -154,8 +150,8 @@ fn main() {
     dbg!(&config);
 
     let (rx, processor) = ParallelSshPropsBuilder::default()
-        .maximum_connections(config.threads)
-        .agent_parallelism(config.agent_parallelism)
+        .tcp_connections_pool(config.threads)
+        .agent_connections_pool(config.agent_parallelism)
         .timeout_socket(Duration::from_millis(config.connection_timeout))
         .timeout_ssh(Duration::from_secs(config.timeout))
         .build()

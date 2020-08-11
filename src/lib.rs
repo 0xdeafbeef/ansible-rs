@@ -1,20 +1,20 @@
 use anyhow::Error;
 use async_channel::{unbounded, Receiver, Sender};
+use async_io::{Async, Timer};
 use async_ssh2_lite::{AsyncSession, SessionConfiguration};
 use futures::prelude::*;
-use futures::stream::FuturesUnordered;
+
 use serde::Serialize;
 use smol::future::FutureExt;
 use smol::io;
-use std::thread;
-use tracing::{event, instrument, Level};
-use async_io::{Async, Timer};
 use std::fmt::{Debug, Display};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::Arc;
+use std::thread;
 use std::time::{Duration, Instant};
 use tokio::macros::support::Pin;
 use tokio::sync::Semaphore;
+use tracing::{event, instrument, Level};
 
 #[derive(Serialize, Debug, Clone)]
 pub struct Response {
@@ -24,13 +24,15 @@ pub struct Response {
     pub status: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ParallelSshProps {
-    maximum_connections: Arc<Semaphore>,
-    agent_parallelism: Arc<Semaphore>,
+    tcp_connections_pool: Arc<Semaphore>,
+    agent_connections_pool: Arc<Semaphore>,
     timeout_socket: Duration,
     timeout_ssh: Duration,
     sender: Sender<Response>,
+    max_tcp_connections: usize,
+    max_agent_connections: usize,
 }
 
 impl Default for ParallelSshPropsBuilder {
@@ -45,13 +47,13 @@ impl Default for ParallelSshPropsBuilder {
 }
 
 impl ParallelSshPropsBuilder {
-    pub fn maximum_connections(&mut self, a: usize) -> &mut Self {
+    pub fn tcp_connections_pool(&mut self, a: usize) -> &mut Self {
         let mut new = self;
         let sem = Semaphore::new(a);
         new.maximum_connections = Some(Arc::new(sem));
         new
     }
-    pub fn agent_parallelism(&mut self, a: usize) -> &mut Self {
+    pub fn agent_connections_pool(&mut self, a: usize) -> &mut Self {
         let mut new = self;
         let sem = Semaphore::new(a);
         new.agent_parallelism = Some(Arc::new(sem));
@@ -82,15 +84,25 @@ impl ParallelSshPropsBuilder {
                     .clone()
                     .as_ref()
                     .ok_or("timeout_socket must be initialized")?,
-                maximum_connections: self
+                tcp_connections_pool: self
                     .maximum_connections
                     .clone()
                     .ok_or("maximum_connections must be initialized")?,
-                agent_parallelism: self
+                agent_connections_pool: self
                     .agent_parallelism
                     .clone()
                     .ok_or("agent_parallelism must be initialized")?,
                 sender: tx,
+                max_tcp_connections: self
+                    .maximum_connections
+                    .clone()
+                    .ok_or("maximum_connections must be initialized")?
+                    .available_permits(),
+                max_agent_connections: self
+                    .agent_parallelism
+                    .clone()
+                    .ok_or("agent_parallelism must be initialized")?
+                    .available_permits(),
             },
         ))
     }
@@ -178,7 +190,7 @@ where
         .await
         .map_err(|e| Error::msg(format!("Failed establishing handshake: {}", e)))?;
     // dbg!("Handshake done");
-    let guard = agent_pool.acquire().await;
+    let _guard = agent_pool.acquire().await;
     sess.userauth_agent_with_try_next("scan")
         .await
         .map_err(|e| Error::msg(format!("Error connecting via agent: {}", e)))?;
@@ -216,12 +228,15 @@ impl ParallelSshProps {
             let process_result = process_host(
                 host,
                 command,
-                self.agent_parallelism.clone(),
-                self.maximum_connections.clone(),
+                self.agent_connections_pool.clone(),
+                self.tcp_connections_pool.clone(),
                 self.sender.clone(),
             );
             futures.push(smol::prelude::FutureExt::boxed(process_result));
         }
         futures
+    }
+    pub fn get_number_of_connections(&self) -> usize {
+        &self.max_tcp_connections - &self.tcp_connections_pool.available_permits()
     }
 }
