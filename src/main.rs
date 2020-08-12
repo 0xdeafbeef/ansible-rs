@@ -1,24 +1,19 @@
 use ansible_rs::Response;
-use ansible_rs::{ParallelSshPropsBuilder};
+use ansible_rs::{ParallelSshProps, ParallelSshPropsBuilder};
+use async_channel::Receiver;
+use async_executor::Task;
 use chrono::Utc;
 use clap::crate_version;
 use clap::{App, Arg};
 use futures::{AsyncWriteExt, Future, StreamExt};
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
-
-
-
 use std::fs::File;
 use std::io::prelude::*;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
-
-use async_channel::Receiver;
-use async_executor::{Task};
 use std::pin::Pin;
 use std::time::Duration;
-
 
 fn hosts_builder(path: &Path) -> Vec<String> {
     let file = File::open(path).expect("Unable to open the file");
@@ -73,45 +68,6 @@ impl Default for Config {
     }
 }
 
-fn save_to_file(conf: &Config, data: Vec<Response>) {
-    let filename = match &conf.output.filename {
-        None => {
-            eprintln!("Filename to save is not given. Printing to stdout.");
-            save_to_console(&conf, &data);
-            return;
-        }
-        Some(a) => Path::new(a.as_str()),
-    };
-
-    let file = match File::create(filename) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("Error saving content to file:{}", e);
-            save_to_console(&conf, &data);
-            return;
-        }
-    };
-    if conf.output.pretty_format {
-        match serde_json::to_writer_pretty(file, &data) {
-            Ok(_) => println!("Saved successfully"),
-            Err(e) => eprintln!("Error saving: {}", e),
-        };
-    } else {
-        match serde_json::to_writer(file, &data) {
-            Ok(_) => println!("Saved successfully"),
-            Err(e) => eprintln!("Error saving: {}", e),
-        }
-    }
-}
-
-fn save_to_console(conf: &Config, data: &[Response]) {
-    if conf.output.pretty_format {
-        println!("{}", serde_json::to_string_pretty(&data).unwrap())
-    } else {
-        println!("{}", serde_json::to_string(&data).unwrap())
-    }
-}
-
 fn main() {
     color_backtrace::install();
     // tracing_subscriber::fmt()
@@ -156,25 +112,10 @@ fn main() {
         .timeout_ssh(Duration::from_secs(config.timeout))
         .build()
         .expect("Failed building ssh processor properties");
-    dbg!(&processor);
+    // dbg!(&processor);
     let com = config.command;
     let hosts_stream = processor.parallel_ssh_process(hosts, &com);
-    incremental_save(hosts_stream, rx);
-    // match config.output.keep_incremental_data {
-    //     Some(true) => {}
-    //     Some(false) => {
-    //         match std::fs::remove_file(Path::new(&inc_for_closure)) {
-    //             Ok(_) => (),
-    //             Err(e) => eprintln!("Error removing temp file : {}", e),
-    //         };
-    //     }
-    //     None => {
-    //         match std::fs::remove_file(Path::new(&inc_for_closure)) {
-    //             Ok(_) => (),
-    //             Err(e) => eprintln!("Error removing temp file : {}", e),
-    //         };
-    //     }
-    // };
+    incremental_save(hosts_stream, rx, processor);
 }
 
 fn progress_bar_creator(queue_len: u64) -> ProgressBar {
@@ -198,49 +139,74 @@ fn config_incremental_folders() -> File {
     let incremental_name = PathBuf::from(store_dir_date + "/incremental_" + &filename + ".json");
     File::create(incremental_name).expect("incremental salving failed.")
 }
+enum Stat {
+    Ok,
+    Fail,
+    TokenFail,
+}
+fn progress_bar_display(queue_len: u64, rx: std::sync::mpsc::Receiver<(Stat, usize, usize)>) {
+    let mut ok = 0;
+    let mut ko = 0;
+    let mut token = 0;
+    let total = progress_bar_creator(queue_len);
+    for _ in 0..queue_len {
+        let (stat, tcp, agent) = match rx.recv() {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("Error receiving stats: {}", e);
+                return;
+            }
+        };
+        match stat {
+            Stat::Ok => ok += 1,
+            Stat::Fail => ko += 1,
+            Stat::TokenFail => token += 1,
+        };
+        total.inc(1);
+        total.set_message(&format!(
+            "OK: {}, Failed: {}, Token: {} Tcp Connections: {}, Agent_connections: {}",
+            ok, ko, token, tcp, agent
+        ));
+    }
+}
 
 fn incremental_save(
     stream: Vec<Pin<Box<dyn Future<Output = ()> + std::marker::Send>>>,
     rx: Receiver<Response>,
+    processor: ParallelSshProps,
 ) {
-    // println!("here");
     let mut file = blocking::Unblock::new(config_incremental_folders());
-    let total = progress_bar_creator(stream.len() as u64);
     let len = stream.len();
+    let (sender, reciever) = std::sync::mpsc::channel();
+    std::thread::spawn(move || progress_bar_display(len as u64, reciever));
     smol::run(async {
         for fut in stream {
             Task::spawn(fut).detach();
         }
-        let mut ok: i32 = 0;
-        let mut ko: i32 = 0;
-        let mut token_fail: i32 = 0;
-        file.write_all(b"[\r\n")
-            .await
-            .expect("Writing for incremental saving failed");
         for _ in 0..len {
             if let Ok(received) = rx.recv().await {
-                if received.status {
-                    ok += 1
+                let stat = if received.status {
+                    Stat::Ok
+                } else if received.result.contains("[-19]") {
+                    Stat::TokenFail
                 } else {
-                    ko += 1;
-                    if received.result.contains("[-19]") {
-                        token_fail += 1;
-                    }
+                    Stat::Fail
                 };
-                total.inc(1);
-                total.set_message(&format!(
-                    "OK: {}, Failed: {}, Token: {}",
-                    ok, ko, token_fail
-                ));
+
+                let (tcp, agent) = (
+                    processor.get_number_of_connections(),
+                    processor.get_number_of_agent_connections(),
+                );
+                if let Err(e) = sender.send((stat, tcp, agent)) {
+                    eprintln!("Error sending stats: {}", e)
+                }
                 let mut data = serde_json::to_string_pretty(&received).unwrap();
-                data += ",\n";
+                data += "\n";
                 file.write_all(data.as_bytes())
                     .await
                     .expect("Writing for incremental saving failed");
             }
         }
-        file.write_all(b"\n]")
-            .await
-            .expect("Writing for incremental saving failed");
+        file.flush().await.expect("Failed flushing");
     });
 }
