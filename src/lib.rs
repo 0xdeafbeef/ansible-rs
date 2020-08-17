@@ -5,12 +5,13 @@ use smol::future::FutureExt;
 use smol::{io, Async, Timer};
 use ssh2::Session;
 use std::fmt::{Debug, Display};
-use std::net::{IpAddr, TcpStream, ToSocketAddrs, SocketAddr};
-use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender};
+use crossbeam_channel::{bounded,unbounded,Sender, Receiver};
+use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
 use std::thread::spawn;
 use std::time::{Duration, Instant};
 use std_semaphore::Semaphore;
+use std::io::Read;
 
 #[derive(Serialize, Debug, Clone)]
 pub struct Response {
@@ -41,13 +42,13 @@ impl Default for ParallelSshPropsBuilder {
 }
 
 impl ParallelSshPropsBuilder {
-    pub fn tcp_connections_pool(&mut self, a: usize) -> &mut Self {
+    pub fn tcp_connections_pool(&mut self, a: isize) -> &mut Self {
         let mut new = self;
         let sem = Semaphore::new(a);
         new.maximum_connections = Some(Arc::new(sem));
         new
     }
-    pub fn agent_connections_pool(&mut self, a: usize) -> &mut Self {
+    pub fn agent_connections_pool(&mut self, a: isize) -> &mut Self {
         let mut new = self;
         let sem = Semaphore::new(a);
         new.agent_parallelism = Some(Arc::new(sem));
@@ -64,7 +65,7 @@ impl ParallelSshPropsBuilder {
         new
     }
     pub fn build(&self) -> Result<(Receiver<Response>, ParallelSshProps), String> {
-        let (tx, rx) = channel();
+        let (tx, rx) = unbounded();
         Ok((
             rx,
             ParallelSshProps {
@@ -114,7 +115,7 @@ fn process_host<A>(
         Err(e) => {
             if let Err(e) = tx.send(Response {
                 result: e.to_string(),
-                hostname,
+                hostname: hostname.clone(),
                 process_time: Default::default(),
                 status: false,
             }) {
@@ -124,7 +125,7 @@ fn process_host<A>(
         }
     };
     let start_time = Instant::now();
-    let result = process_host_inner(hostname.clone(), command, agent_pool.clone());
+    let result: Result<String, Error> = process_host_inner(hostname.clone(), command, agent_pool.clone());
     let process_time = Instant::now() - start_time;
     let res = match result {
         Ok(a) => Response {
@@ -153,7 +154,7 @@ fn process_host<A>(
 }
 
 fn process_host_inner<A>(
-    ip: SocketAddr,
+    ip: A,
     command: Arc<String>,
     agent_pool: Arc<Mutex<()>>,
 ) -> Result<String, Error>
@@ -181,6 +182,7 @@ where
         .map_err(|e| Error::msg(format!("Failed executing command in channel: {}", e)))?;
     let mut channel_buffer = String::with_capacity(4096);
     channel
+        .stream(0)
         .read_to_string(&mut channel_buffer)
         .map_err(|e| Error::msg(format!("Error reading result of work: {}", e)))?;
     Ok(channel_buffer)
@@ -205,7 +207,7 @@ where
     Ok(address)
 }
 
-async fn check_hosts<A>(hosts: Vec<A>, tx: SyncSender<(String, Result<SocketAddr, Error>)>)
+async fn check_hosts<A>(hosts: Vec<A>, tx: Sender<(String, Result<SocketAddr, Error>)>)
 where
     A: Display + ToSocketAddrs + Send + Sync + Clone + Debug,
 {
@@ -223,15 +225,26 @@ impl ParallelSshProps {
     where
         A: Display + ToSocketAddrs + Send + Sync + Clone + Debug,
     {
-        let (tx, rx): (SyncSender<(String, Result<SocketAddr, Error>)>, Receiver<(String, Result<SocketAddr, Error>)>) = sync_channel(15);
+        let (tx, rx): (
+            Sender<(String, Result<SocketAddr, Error>)>,
+            Receiver<(String, Result<SocketAddr, Error>)>,
+        ) = bounded(15);
+        //todo number of threads
+
         let command = Arc::new(command.to_string());
         let agent_pool = Arc::new(std::sync::Mutex::new(()));
-        spawn(|| check_hosts(hosts, tx.clone()));
-        rx
-            .into_iter()
+        spawn(move || check_hosts(hosts, tx.clone()));
+        rx.into_iter()
             .par_bridge()
-            .map(|(hostname, ip)| process_host(hostname, ip, command.clone(), agent_pool.clone(), self.sender.clone()))
-            .for_each(|x| self.sender());
-
+            .map(|(hostname, ip)| {
+                process_host::<SocketAddr>(
+                    hostname,
+                    ip,
+                    command.clone(),
+                    agent_pool.clone(),
+                     self.sender.clone(),
+                )
+            })
+            .for_each(|x|drop(x));
     }
 }
