@@ -1,5 +1,5 @@
 use crate::Response;
-use serde::{Deserialize};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::fs::File;
@@ -7,7 +7,7 @@ use std::io::{BufRead, BufReader};
 use std::net::Ipv4Addr;
 use std::path::Path;
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, Serialize)]
 pub struct OutputProps {
     pub save_to_file: bool,
     pub filename: Option<String>,
@@ -16,7 +16,7 @@ pub struct OutputProps {
     pub keep_incremental_data: Option<bool>,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, Serialize)]
 pub struct Config {
     pub threads: usize,
     pub agent_parallelism: isize,
@@ -42,7 +42,7 @@ impl Default for Config {
         Config {
             threads: 10,
             agent_parallelism: 1,
-            command: String::default(),
+            command: "uptime".to_string(),
             output: OutputProps::default(),
             timeout: 60,
         }

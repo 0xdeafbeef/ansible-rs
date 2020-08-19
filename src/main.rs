@@ -17,7 +17,7 @@ use std::thread::spawn;
 use std::time::{Duration};
 
 mod misc;
-use misc::{generate_kv_hosts_from_csv, get_config, hosts_builder};
+use misc::{generate_kv_hosts_from_csv, get_config, hosts_builder, Config};
 use std::net::SocketAddr;
 
 fn main() {
@@ -31,7 +31,7 @@ fn main() {
                 .help("Path to hosts file")
                 .required(false)
                 .takes_value(true)
-                .default_value("config.toml"),
+                .default_value("./config.toml"),
         )
         .arg(
             Arg::with_name("hosts")
@@ -50,7 +50,7 @@ fn main() {
                 .default_value(""),
         )
         .get_matches();
-    let config = get_config(Path::new(&args.value_of("config").unwrap()));
+    let config: Config = confy::load_path(args.value_of("config").unwrap()).unwrap();
     let command = &config.command;
 
     let hosts = if args.value_of("hosts_format").unwrap() == "csv" {

@@ -29,6 +29,7 @@ pub struct ParallelSshProps {
     timeout_socket: Duration,
     timeout_ssh: Duration,
     sender: Sender<Response>,
+    tcp_threads_number: isize
 }
 
 impl Default for ParallelSshPropsBuilder {
@@ -38,6 +39,7 @@ impl Default for ParallelSshPropsBuilder {
             agent_parallelism: Some(Arc::new(Semaphore::new(3))),
             timeout_socket: Some(Duration::from_millis(200)),
             timeout_ssh: Some(Duration::from_secs(120)),
+            tcp_threads_number: Some(10)
         }
     }
 }
@@ -47,6 +49,7 @@ impl ParallelSshPropsBuilder {
         let mut new = self;
         let sem = Semaphore::new(a);
         new.maximum_connections = Some(Arc::new(sem));
+        new.tcp_threads_number = Some(a);
         new
     }
     pub fn agent_connections_pool(&mut self, a: isize) -> &mut Self {
@@ -88,6 +91,11 @@ impl ParallelSshPropsBuilder {
                     .agent_parallelism
                     .clone()
                     .ok_or("agent_parallelism must be initialized")?,
+                tcp_threads_number:
+                self
+                    .tcp_threads_number
+                    .clone()
+                    .ok_or("maximum_connections must be initialized")?,
                 sender: tx,
             },
         ))
@@ -100,6 +108,7 @@ pub struct ParallelSshPropsBuilder {
     agent_parallelism: Option<Arc<Semaphore>>,
     timeout_socket: Option<Duration>,
     timeout_ssh: Option<Duration>,
+    tcp_threads_number: Option<isize>
 }
 
 fn process_host<A>(
@@ -229,7 +238,7 @@ impl ParallelSshProps {
         A: Display + ToSocketAddrs + Send + Sync + Clone + Debug,
         I: IntoIterator<Item = (A, String)> + std::marker::Send,
     {
-        let (tx, rx) = bounded(15);
+        let (tx, rx) = bounded(self.tcp_threads_number as usize * 2);
         spawn(move || check_hosts(hosts, tx.clone()));
         //todo number of threads
 
