@@ -5,7 +5,7 @@ on:
     # branches:
     # - ag/release
     tags:
-    - '[0-9]+.[0-9]+.[0-9]+'
+    - '.*[0-9]+.[0-9]+.[0-9]+.*'
 jobs:
   create-release:
     name: create-release
@@ -13,7 +13,6 @@ jobs:
     steps:
       - name: Create artifacts directory
         run: mkdir artifacts
-
       - name: Get the release version from the tag
         run: |
           # Apparently, this is the right way to get a tag name. Really?
@@ -55,8 +54,6 @@ jobs:
       TARGET_DIR: ./target
       # Emit backtraces on panics.
       RUST_BACKTRACE: 1
-      # Build static releases with PCRE2.
-      PCRE2_SYS_STATIC: 1
     strategy:
       matrix:
         build: [linux, linux-arm, macos, win-msvc, win-gnu, win32-msvc]
