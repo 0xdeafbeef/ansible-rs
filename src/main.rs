@@ -1,20 +1,24 @@
-use std::collections::BTreeMap;
-use std::fs::File;
-use std::io::prelude::*;
-use std::path::{Path, PathBuf};
-use crossbeam_channel::Receiver;
-use std::sync::{mpsc, Arc};
-use std::thread::spawn;
-use std::time::{Instant, Duration};
+use ansible_rs::{ParallelSshProps, ParallelSshPropsBuilder, Response};
 use chrono::Utc;
 use clap::crate_version;
 use clap::{App, Arg};
 use color_backtrace;
+use crossbeam_channel::Receiver;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
-use std_semaphore::Semaphore;
-use ansible_rs::{ParallelSshPropsBuilder, Response};
+use std::collections::BTreeMap;
+use std::fs::File;
+use std::io::prelude::*;
+use std::net::IpAddr;
+use std::path::{Path, PathBuf};
+
+use std::thread::spawn;
+use std::time::{Duration};
+
+mod misc;
+use misc::{generate_kv_hosts_from_csv, get_config, hosts_builder};
+use std::net::SocketAddr;
 
 fn main() {
     color_backtrace::install();
@@ -50,11 +54,15 @@ fn main() {
     let command = &config.command;
 
     let hosts = if args.value_of("hosts_format").unwrap() == "csv" {
-        generate_kv_hosts_from_csv(&args.value_of("hosts").unwrap()).unwrap()
+        let hosts = generate_kv_hosts_from_csv(&args.value_of("hosts").unwrap()).unwrap();
+        hosts
+            .into_iter()
+            .map(|(ad, com)| (SocketAddr::new(IpAddr::from(ad), 22), com))
+            .collect()
     } else {
         let mut map = BTreeMap::new();
         for h in hosts_builder(Path::new(&args.value_of("hosts").unwrap())) {
-            map.insert(h, command.clone());
+            map.insert(SocketAddr::new(IpAddr::from(h), 22), command.clone());
         }
         map
     };
@@ -63,17 +71,17 @@ fn main() {
         .num_threads(config.threads)
         .build_global()
         .expect("failed creating pool");
-    let ( channel,ssh_processor) = ParallelSshPropsBuilder::default()
+    let (channel, ssh_processor): (_, ParallelSshProps) = ParallelSshPropsBuilder::default()
         .agent_connections_pool(config.agent_parallelism)
         .tcp_connections_pool(config.threads as isize)
         .timeout_socket(Duration::from_millis(config.timeout as u64))
         .timeout_ssh(Duration::from_secs(60))
         .build()
         .expect("Failed building ssh_processor instance");
-    spawn(||incremental_save(channel, hosts.len()));
-
-
-
+    let len = hosts.len();
+    let handler = spawn(move || incremental_save(channel, len));
+    ssh_processor.parallel_ssh_process(hosts);
+    handler.join().unwrap();
 }
 
 fn progress_bar_creator(queue_len: u64) -> ProgressBar {
@@ -121,38 +129,32 @@ fn progress_bar_display(queue_len: u64, rx: std::sync::mpsc::Receiver<Stat>) {
             Stat::TokenFail => token += 1,
         };
         total.inc(1);
-        total.set_message(&format!(
-            "OK: {}, Failed: {}, Token: {}",
-            ok, ko, token
-        ));
+        total.set_message(&format!("OK: {}, Failed: {}, Token: {}", ok, ko, token));
     }
 }
 
-fn incremental_save(
-    rx: Receiver<Response>,
-    stream_len: usize
-) {
+fn incremental_save(rx: Receiver<Response>, stream_len: usize) {
     let mut file = config_incremental_folders();
     let len = stream_len;
     let (sender, reciever) = std::sync::mpsc::channel();
     std::thread::spawn(move || progress_bar_display(len as u64, reciever));
-        for _ in 0..len {
-            if let Ok(received) = rx.recv() {
-                let stat = if received.status {
-                    Stat::Ok
-                } else if received.result.contains("[-19]") {
-                    Stat::TokenFail
-                } else {
-                    Stat::Fail
-                };
-                if let Err(e) = sender.send(stat) {
-                    eprintln!("Error sending stats: {}", e)
-                }
-                let mut data = serde_json::to_string_pretty(&received).unwrap();
-                data += "\n";
-                file.write_all(data.as_bytes())
-                    .expect("Writing for incremental saving failed");
+    for _ in 0..len {
+        if let Ok(received) = rx.recv() {
+            let stat = if received.status {
+                Stat::Ok
+            } else if received.result.contains("[-19]") {
+                Stat::TokenFail
+            } else {
+                Stat::Fail
+            };
+            if let Err(e) = sender.send(stat) {
+                eprintln!("Error sending stats: {}", e)
             }
+            let mut data = serde_json::to_string_pretty(&received).unwrap();
+            data += "\n";
+            file.write_all(data.as_bytes())
+                .expect("Writing for incremental saving failed");
         }
-        file.flush().expect("Failed flushing");
+    }
+    file.flush().expect("Failed flushing");
 }

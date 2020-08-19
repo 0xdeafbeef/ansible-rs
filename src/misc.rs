@@ -1,26 +1,19 @@
+use crate::Response;
+use serde::{Deserialize};
 use std::collections::BTreeMap;
+use std::fs;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::net::Ipv4Addr;
 use std::path::Path;
-use std::fs::File;
-use std::io::{BufReader, BufRead};
-use serde::{Deserialize, Serialize};
-use std::fs;
-
-#[derive(Serialize, Debug, Clone)]
-pub struct Response {
-    pub     result: String,
-    pub  hostname: String,
-    pub  process_time: String,
-    pub  status: bool,
-}
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct OutputProps {
-   pub save_to_file: bool,
+    pub save_to_file: bool,
     pub filename: Option<String>,
     pub pretty_format: bool,
-    pub  show_progress: bool,
-    pub  keep_incremental_data: Option<bool>,
+    pub show_progress: bool,
+    pub keep_incremental_data: Option<bool>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -56,7 +49,6 @@ impl Default for Config {
     }
 }
 
-
 pub fn hosts_builder(path: &Path) -> Vec<Ipv4Addr> {
     let file = File::open(path).expect("Unable to open the file");
     let reader = BufReader::new(file);
@@ -70,8 +62,9 @@ pub fn hosts_builder(path: &Path) -> Vec<Ipv4Addr> {
         .collect()
 }
 
-
-pub fn generate_kv_hosts_from_csv(path: &str) -> Result<BTreeMap<Ipv4Addr, String>, std::io::Error> {
+pub fn generate_kv_hosts_from_csv(
+    path: &str,
+) -> Result<BTreeMap<Ipv4Addr, String>, std::io::Error> {
     let mut rd = csv::ReaderBuilder::new().from_path(Path::new(path))?;
     let mut map = BTreeMap::new();
     for res in rd.records() {
@@ -89,7 +82,6 @@ pub fn generate_kv_hosts_from_csv(path: &str) -> Result<BTreeMap<Ipv4Addr, Strin
     }
     Ok(map)
 }
-
 
 pub fn get_config(path: &Path) -> Config {
     let f = match fs::read_to_string(path) {
