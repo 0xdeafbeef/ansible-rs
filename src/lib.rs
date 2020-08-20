@@ -29,7 +29,7 @@ pub struct ParallelSshProps {
     timeout_socket: Duration,
     timeout_ssh: Duration,
     sender: Sender<Response>,
-    tcp_threads_number: isize
+    tcp_threads_number: isize,
 }
 
 impl Default for ParallelSshPropsBuilder {
@@ -39,7 +39,7 @@ impl Default for ParallelSshPropsBuilder {
             agent_parallelism: Some(Arc::new(Semaphore::new(3))),
             timeout_socket: Some(Duration::from_millis(200)),
             timeout_ssh: Some(Duration::from_secs(120)),
-            tcp_threads_number: Some(10)
+            tcp_threads_number: Some(10),
         }
     }
 }
@@ -91,8 +91,7 @@ impl ParallelSshPropsBuilder {
                     .agent_parallelism
                     .clone()
                     .ok_or("agent_parallelism must be initialized")?,
-                tcp_threads_number:
-                self
+                tcp_threads_number: self
                     .tcp_threads_number
                     .clone()
                     .ok_or("maximum_connections must be initialized")?,
@@ -108,7 +107,7 @@ pub struct ParallelSshPropsBuilder {
     agent_parallelism: Option<Arc<Semaphore>>,
     timeout_socket: Option<Duration>,
     timeout_ssh: Option<Duration>,
-    tcp_threads_number: Option<isize>
+    tcp_threads_number: Option<isize>,
 }
 
 fn process_host<A>(

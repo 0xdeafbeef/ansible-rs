@@ -14,7 +14,7 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use std::thread::spawn;
-use std::time::{Duration};
+use std::time::Duration;
 
 mod misc;
 use misc::{generate_kv_hosts_from_csv, get_config, hosts_builder, Config};
