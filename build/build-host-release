@@ -1,0 +1,69 @@
+#!/bin/bash
+
+BUILD_TARGET=""
+while getopts "t:" opt; do
+    case $opt in
+        t)
+            BUILD_TARGET=$OPTARG
+            ;;
+        ?)
+            echo "Usage: $(basename $0) [-t <target-triple>]"
+            ;;
+    esac
+done
+
+ROOT_DIR=$( cd $( dirname $0 ) && pwd )
+VERSION=$(grep -E '^version' "${ROOT_DIR}/../Cargo.toml" | awk '{print $3}' | sed 's/"//g')
+HOST_TRIPLE=$(rustc -Vv | grep 'host:' | awk '{print $2}')
+
+echo "Started build release for ${HOST_TRIPLE} ..."
+
+cargo build --release  --target "${BUILD_TARGET}"
+
+
+if [[ "$?" != "0" ]]; then
+    exit $?;
+fi
+
+TARGET_SUFFIX=""
+if [[ "${HOST_TRIPLE}" == *"-windows-"* ]]; then
+    TARGET_SUFFIX=".exe"
+fi
+
+TARGETS=("ansible-rs${TARGET_SUFFIX}")
+
+RELEASE_FOLDER="${ROOT_DIR}/release"
+RELEASE_PACKAGE_NAME="ansible-rs${VERSION}.${HOST_TRIPLE}"
+
+mkdir -p "${RELEASE_FOLDER}"
+
+# Into release folder
+if [[ "${BUILD_TARGET}" != "" ]]; then
+    cd "${ROOT_DIR}/../target/${BUILD_TARGET}/release"
+else
+    cd "${ROOT_DIR}/../target/release"
+fi
+
+if [[ "${HOST_TRIPLE}" == *"-windows-"* ]]; then
+    # For Windows, use zip
+
+    RELEASE_PACKAGE_FILE_NAME="${RELEASE_PACKAGE_NAME}.zip"
+    RELEASE_PACKAGE_FILE_PATH="${RELEASE_FOLDER}/${RELEASE_PACKAGE_FILE_NAME}"
+    zip "${RELEASE_PACKAGE_FILE_PATH}" "${TARGETS[@]}"
+
+    # Checksum
+    cd "${RELEASE_FOLDER}"
+    shasum -a 256 "${RELEASE_PACKAGE_FILE_NAME}" > "${RELEASE_PACKAGE_FILE_NAME}.sha256"
+else
+    # For others, Linux, OS X, uses tar.xz
+
+    RELEASE_PACKAGE_FILE_NAME="${RELEASE_PACKAGE_NAME}.tar.xz"
+    RELEASE_PACKAGE_FILE_PATH="${RELEASE_FOLDER}/${RELEASE_PACKAGE_FILE_NAME}"
+    tar -cJf "${RELEASE_PACKAGE_FILE_PATH}" "${TARGETS[@]}"
+
+    # Checksum
+    cd "${RELEASE_FOLDER}"
+    shasum -a 256 "${RELEASE_PACKAGE_FILE_NAME}" > "${RELEASE_PACKAGE_FILE_NAME}.sha256"
+fi
+
+echo "Finished build release ${RELEASE_PACKAGE_FILE_PATH}"

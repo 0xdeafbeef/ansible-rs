@@ -1,0 +1,3 @@
+FROM rustembedded/cross:arm-unknown-linux-gnueabihf
+RUN apt-get update && \
+    apt-get install --no-install-recommends -y  libssl-dev
