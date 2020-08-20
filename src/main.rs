@@ -19,58 +19,48 @@ use std::time::Duration;
 mod misc;
 use misc::{generate_kv_hosts_from_csv, get_config, hosts_builder, Config};
 use std::net::SocketAddr;
+use structopt::StructOpt;
+
+#[derive(StructOpt, Debug)]
+#[structopt(name = "ansible-rs")]
+struct Args {
+    #[structopt(long)]
+    #[structopt(short, help = "Path to config", default_value = "./config.toml")]
+    config: String,
+    #[structopt(long, help = "Path to hosts file")]
+    hosts: PathBuf,
+    #[structopt(long, default_value = "list")]
+    hosts_format: String,
+    #[structopt(long, short, help = "Module name")]
+    module: Option<String>,
+}
 
 fn main() {
     color_backtrace::install();
-    let args = App::new("ansible-rs")
-        .version(crate_version!())
-        .arg(
-            Arg::with_name("config")
-                .short("c")
-                .long("config")
-                .help("Path to hosts file")
-                .required(false)
-                .takes_value(true)
-                .default_value("./config.toml"),
-        )
-        .arg(
-            Arg::with_name("hosts")
-                .long("hosts")
-                .help("Path to file with hosts")
-                .required(true)
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("hosts_format")
-                .short("f")
-                .long("format")
-                .takes_value(true)
-                .help("Hosts format")
-                .long_help("Hosts format: csv for key value and empty(default) for list")
-                .default_value(""),
-        )
-        .get_matches();
-    let config: Config = confy::load_path(args.value_of("config").unwrap()).unwrap();
+    let args: Args = Args::from_args();
+    let config: Config = confy::load_path(args.config).unwrap();
     let command = &config.command;
 
-    let hosts = if args.value_of("hosts_format").unwrap() == "csv" {
-        let hosts = generate_kv_hosts_from_csv(&args.value_of("hosts").unwrap()).unwrap();
+    let hosts = if args.hosts_format == "csv" {
+        let hosts = generate_kv_hosts_from_csv(&args.hosts).unwrap();
         hosts
             .into_iter()
             .map(|(ad, com)| (SocketAddr::new(IpAddr::from(ad), 22), com))
             .collect()
     } else {
         let mut map = BTreeMap::new();
-        for h in hosts_builder(Path::new(&args.value_of("hosts").unwrap())) {
+        for h in hosts_builder(&args.hosts) {
             map.insert(SocketAddr::new(IpAddr::from(h), 22), command.clone());
         }
         map
     };
+
     dbg!(&config);
     ThreadPoolBuilder::new()
         .num_threads(config.threads)
         .build_global()
         .expect("failed creating pool");
+
     let (channel, ssh_processor): (_, ParallelSshProps) = ParallelSshPropsBuilder::default()
         .agent_connections_pool(config.agent_parallelism)
         .tcp_connections_pool(config.threads as isize)
@@ -90,7 +80,6 @@ fn progress_bar_creator(queue_len: u64) -> ProgressBar {
         .template("{eta_precise} {wide_bar} Hosts processed: {pos}/{len} Speed: {per_sec} {msg}")
         .progress_chars("##-");
     total_hosts_processed.set_style(total_style);
-
     total_hosts_processed
 }
 

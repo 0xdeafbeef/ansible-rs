@@ -5,6 +5,7 @@ use serde::Serialize;
 use smol::future::FutureExt;
 use smol::{io, Async, Timer};
 use ssh2::Session;
+mod modules;
 
 use std::fmt::{Debug, Display};
 use std::io::Read;

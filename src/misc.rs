@@ -5,7 +5,7 @@ use std::fs;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::net::Ipv4Addr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Deserialize, Debug, Clone, Serialize)]
 pub struct OutputProps {
@@ -14,6 +14,7 @@ pub struct OutputProps {
     pub pretty_format: bool,
     pub show_progress: bool,
     pub keep_incremental_data: Option<bool>,
+    pub root_module_path: Option<PathBuf>,
 }
 
 #[derive(Deserialize, Debug, Clone, Serialize)]
@@ -33,6 +34,7 @@ impl Default for OutputProps {
             pretty_format: false,
             show_progress: false,
             keep_incremental_data: Some(false),
+            root_module_path: Option::default(),
         }
     }
 }
@@ -63,9 +65,9 @@ pub fn hosts_builder(path: &Path) -> Vec<Ipv4Addr> {
 }
 
 pub fn generate_kv_hosts_from_csv(
-    path: &str,
+    path: &Path,
 ) -> Result<BTreeMap<Ipv4Addr, String>, std::io::Error> {
-    let mut rd = csv::ReaderBuilder::new().from_path(Path::new(path))?;
+    let mut rd = csv::ReaderBuilder::new().from_path(path)?;
     let mut map = BTreeMap::new();
     for res in rd.records() {
         let rec = match res {
