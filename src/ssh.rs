@@ -112,127 +112,6 @@ pub struct ParallelSshPropsBuilder {
     tcp_threads_number: Option<isize>,
 }
 
-fn process_host<A>(
-    hostname: String,
-    ip: Result<SocketAddr, Error>,
-    command: String,
-    agent_pool: Arc<Mutex<()>>,
-    tx: Sender<Response>,
-) where
-    A: ToSocketAddrs + Display + Sync + Clone + Send + Debug,
-{
-    let hostname = match ip {
-        Ok(a) => a,
-        Err(e) => {
-            if let Err(_e) = tx.send(Response {
-                result: e.to_string(),
-                hostname: hostname.clone(),
-                process_time: Default::default(),
-                status: false,
-            }) {
-                eprintln!("Error sending result for {}", hostname);
-            }
-            return;
-        }
-    };
-    let start_time = Instant::now();
-    let result: Result<String, Error> =
-        process_host_inner(hostname.clone(), command, agent_pool.clone());
-    let process_time = Instant::now() - start_time;
-    let res = match result {
-        Ok(a) => Response {
-            result: a,
-            hostname: hostname.to_string(),
-            process_time,
-            status: true,
-        },
-        Err(e) => Response {
-            result: e.to_string(),
-            hostname: hostname.to_string(),
-            process_time,
-            status: false,
-        },
-    };
-    if let Err(e) = tx.send(res) {
-        eprintln!("Error sending to channel: {}", e)
-    }
-    // event!(`
-    //     Level::INFO,
-    //     "processed :{}, id: {:#?}\nAGENT: {}\n",
-    //     hostname,
-    //     thread::current().id(),
-    //     agent_pool.available_permits()
-    // );
-}
-
-fn process_host_inner<A>(
-    ip: A,
-    command: String,
-    agent_pool: Arc<Mutex<()>>,
-) -> Result<String, Error>
-where
-    A: ToSocketAddrs + Display + Sync + Clone + Send + Debug,
-{
-    const TIMEOUT: u32 = 60000;
-
-    let tcp = TcpStream::connect(ip)?;
-    let mut sess =
-        Session::new().map_err(|_e| Error::msg("Error initializing session".to_string()))?;
-    sess.set_tcp_stream(tcp);
-    sess.set_timeout(TIMEOUT);
-    sess.handshake()
-        .map_err(|e| Error::msg(format!("Failed establishing handshake: {}", e)))?;
-    let guard = agent_pool.lock();
-    sess.userauth_agent("scan")
-        .map_err(|e| Error::msg(format!("Error connecting via an agent: {}", e)))?;
-    drop(guard);
-    let mut channel = sess
-        .channel_session()
-        .map_err(|e| Error::msg(format!("Failed opening channel: {}", e)))?;
-    channel
-        .exec(&command)
-        .map_err(|e| Error::msg(format!("Failed executing command in a channel: {}", e)))?;
-    let mut channel_buffer = String::with_capacity(4096);
-    channel
-        .stream(0)
-        .read_to_string(&mut channel_buffer)
-        .map_err(|e| Error::msg(format!("Error reading result of work: {}", e)))?;
-    Ok(channel_buffer)
-}
-
-async fn check_host<A>(hostname: A) -> Result<SocketAddr, Error>
-where
-    A: Display + ToSocketAddrs + Send + Sync + Clone + Debug,
-{
-    let address = &hostname
-        .to_socket_addrs()?
-        .next()
-        .ok_or_else(|| Error::msg("Failed converting address"))?;
-    let address: SocketAddr = address.clone();
-
-    let _tcp = Async::<TcpStream>::connect(address.clone())
-        .or(async {
-            Timer::new(Duration::from_millis(200)).await;
-            Err(io::ErrorKind::TimedOut.into())
-        })
-        .await?;
-    Ok(address)
-}
-
-fn check_hosts<A, I>(hosts: I, tx: Sender<(String, Result<SocketAddr, Error>)>)
-where
-    A: Display + ToSocketAddrs + Send + Sync + Clone + Debug,
-    I: IntoIterator<Item = (A)>,
-{
-    smol::run(async {
-        for host in hosts {
-            let res = check_host(&host).await;
-            if let Err(e) = tx.send((host.to_string(), res)) {
-                eprintln!("Error transmitting ip address between threads: {}", e)
-            }
-        }
-    })
-}
 impl ParallelSshProps {
     pub fn parallel_command_evaluation<A: 'static, I: 'static>(&self, hosts: I)
     where
@@ -244,10 +123,8 @@ impl ParallelSshProps {
         let (tx, rx) = bounded(self.tcp_threads_number as usize * 2);
         {
             let hosts: Vec<_> = lookup_table.clone().into_iter().map(|(k, v)| k).collect();
-            spawn(move || check_hosts(hosts, tx.clone()));
+            spawn(move || Self::check_hosts(hosts, tx.clone()));
         }
-
-        let agent_pool = Arc::new(std::sync::Mutex::new(()));
 
         rx.into_iter()
             .par_bridge()
@@ -258,16 +135,11 @@ impl ParallelSshProps {
                 (hostname, command.clone(), ip)
             })
             .map(|(hostname, command, ip)| {
-                process_host::<SocketAddr>(
-                    hostname,
-                    ip,
-                    command.to_string(),
-                    agent_pool.clone(),
-                    self.sender.clone(),
-                )
+                self.process_host::<SocketAddr>(hostname, ip, command.to_string())
             })
             .for_each(|x| drop(x));
     }
+
     pub fn parallel_module_evaluation<A: 'static, I: 'static, LIST: 'static>(
         &self,
         hosts: I,
@@ -278,8 +150,127 @@ impl ParallelSshProps {
         LIST: IntoIterator<Item = ModuleProps> + Send,
     {
         let (tx, rx) = bounded(self.tcp_threads_number as usize * 2);
-        spawn(move || check_hosts(hosts, tx.clone()));
+        spawn(move || Self::check_hosts(hosts, tx.clone()));
+    }
 
-        let agent_pool = Arc::new(std::sync::Mutex::new(()));
+    fn process_host<A>(&self, hostname: String, ip: Result<SocketAddr, Error>, command: String)
+    where
+        A: ToSocketAddrs + Display + Sync + Clone + Send + Debug,
+    {
+        let tx = self.sender.clone();
+        let hostname = match ip {
+            Ok(a) => a,
+            Err(e) => {
+                if let Err(_e) = tx.send(Response {
+                    result: e.to_string(),
+                    hostname: hostname.clone(),
+                    process_time: Default::default(),
+                    status: false,
+                }) {
+                    eprintln!("Error sending result for {}", hostname);
+                }
+                return;
+            }
+        };
+        let start_time = Instant::now();
+        let result: Result<String, Error> = Self::process_host_inner(
+            hostname.clone(),
+            command,
+            self.agent_connections_pool.clone(),
+        );
+        let process_time = Instant::now() - start_time;
+        let res = match result {
+            Ok(a) => Response {
+                result: a,
+                hostname: hostname.to_string(),
+                process_time,
+                status: true,
+            },
+            Err(e) => Response {
+                result: e.to_string(),
+                hostname: hostname.to_string(),
+                process_time,
+                status: false,
+            },
+        };
+        if let Err(e) = tx.send(res) {
+            eprintln!("Error sending to channel: {}", e)
+        }
+        // event!(`
+        //     Level::INFO,
+        //     "processed :{}, id: {:#?}\nAGENT: {}\n",
+        //     hostname,
+        //     thread::current().id(),
+        //     agent_pool.available_permits()
+        // );
+    }
+
+    fn process_host_inner<A>(
+        ip: A,
+        command: String,
+        agent_pool: Arc<Semaphore>,
+    ) -> Result<String, Error>
+    where
+        A: ToSocketAddrs + Display + Sync + Clone + Send + Debug,
+    {
+        const TIMEOUT: u32 = 60000;
+
+        let tcp = TcpStream::connect(ip)?;
+        let mut sess =
+            Session::new().map_err(|_e| Error::msg("Error initializing session".to_string()))?;
+        sess.set_tcp_stream(tcp);
+        sess.set_timeout(TIMEOUT);
+        sess.handshake()
+            .map_err(|e| Error::msg(format!("Failed establishing handshake: {}", e)))?;
+        let guard = agent_pool.access();
+        sess.userauth_agent("scan")
+            .map_err(|e| Error::msg(format!("Error connecting via an agent: {}", e)))?;
+        drop(guard);
+        let mut channel = sess
+            .channel_session()
+            .map_err(|e| Error::msg(format!("Failed opening channel: {}", e)))?;
+        channel
+            .exec(&command)
+            .map_err(|e| Error::msg(format!("Failed executing command in a channel: {}", e)))?;
+        let mut channel_buffer = String::with_capacity(4096);
+        channel
+            .stream(0)
+            .read_to_string(&mut channel_buffer)
+            .map_err(|e| Error::msg(format!("Error reading result of work: {}", e)))?;
+        Ok(channel_buffer)
+    }
+
+    async fn check_host<A>(hostname: A) -> Result<SocketAddr, Error>
+    where
+        A: Display + ToSocketAddrs + Send + Sync + Clone + Debug,
+    {
+        let address = &hostname
+            .to_socket_addrs()?
+            .next()
+            .ok_or_else(|| Error::msg("Failed converting address"))?;
+        let address: SocketAddr = address.clone();
+
+        let _tcp = Async::<TcpStream>::connect(address.clone())
+            .or(async {
+                Timer::new(Duration::from_millis(200)).await;
+                Err(io::ErrorKind::TimedOut.into())
+            })
+            .await?;
+        Ok(address)
+    }
+
+    fn check_hosts<A, I>(hosts: I, tx: Sender<(String, Result<SocketAddr, Error>)>)
+    where
+        A: Display + ToSocketAddrs + Send + Sync + Clone + Debug,
+        I: IntoIterator<Item = (A)>,
+    {
+        smol::run(async {
+            for host in hosts {
+                let res = Self::check_host(&host).await;
+                if let Err(e) = tx.send((host.to_string(), res)) {
+                    eprintln!("Error transmitting ip address between threads: {}", e)
+                }
+            }
+        })
     }
 }
