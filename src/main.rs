@@ -1,4 +1,4 @@
-use ansible_rs::{ParallelSshProps, ParallelSshPropsBuilder, Response};
+use ansible_rs::ssh::{ParallelSshProps, ParallelSshPropsBuilder, Response};
 use chrono::Utc;
 use clap::crate_version;
 use clap::{App, Arg};
@@ -139,7 +139,7 @@ fn incremental_save(rx: Receiver<Response>, stream_len: usize) {
             if let Err(e) = sender.send(stat) {
                 eprintln!("Error sending stats: {}", e)
             }
-            let mut data = serde_json::to_string_pretty(&received).unwrap();
+            let mut data = serde_json::to_string(&received).unwrap();
             data += "\n";
             file.write_all(data.as_bytes())
                 .expect("Writing for incremental saving failed");

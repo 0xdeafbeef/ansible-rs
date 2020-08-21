@@ -42,7 +42,7 @@ pub struct ModuleProps {
     exec_path: PathBuf,
 }
 impl ModuleProps {
-  pub  fn new(path: &Path) -> Result<ModuleProps, Error> {
+    pub fn new(path: &Path) -> Result<ModuleProps, Error> {
         let mut file = File::open(path)?;
         let mut content = String::new();
         file.read_to_string(&mut content)?;
@@ -84,8 +84,8 @@ impl ModuleTree {
             .collect();
         ModuleTree { Tree: map }
     }
-    pub fn run_module(&self, module_name: &str, ) ->Result<(), Error>
-    {
-        
-    }
+    // pub fn run_module(&self, module_name: &str, ) ->Result<(), Error>
+    // {
+    //
+    // }
 }
