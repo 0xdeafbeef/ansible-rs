@@ -14,6 +14,8 @@ use std::sync::{Arc, Mutex};
 use std::thread::spawn;
 use std::time::{Duration, Instant};
 use std_semaphore::Semaphore;
+use modules::ModuleProps;
+use std::collections::HashMap;
 
 #[derive(Serialize, Debug, Clone)]
 pub struct Response {
@@ -233,14 +235,14 @@ where
     })
 }
 impl ParallelSshProps {
-    pub fn parallel_ssh_process<A: 'static, I: 'static>(&self, hosts: I)
+    pub fn parallel_command_evaluation<A: 'static, I: Iterator+ 'static>(&self, hosts: I)
     where
         A: Display + ToSocketAddrs + Send + Sync + Clone + Debug,
-        I: IntoIterator<Item = (A, String)> + std::marker::Send,
+        I: IntoIterator<Item = (A, String)> + Send,
     {
+        let lookup_table: HashMap<_,_> = hosts.cloned().collect();
         let (tx, rx) = bounded(self.tcp_threads_number as usize * 2);
         spawn(move || check_hosts(hosts, tx.clone()));
-        //todo number of threads
 
         let agent_pool = Arc::new(std::sync::Mutex::new(()));
 
@@ -257,4 +259,15 @@ impl ParallelSshProps {
             })
             .for_each(|x| drop(x));
     }
+    pub fn parallel_module_evaluation<A: 'static, I: 'static, LIST: 'static>(&self, hosts: I, module:  LIST)
+        where
+            A: Display + ToSocketAddrs + Send + Sync + Clone + Debug,
+            I: IntoIterator<Item = A> + Send,
+            LIST : IntoIterator<Item=ModuleProps> +Send
+    {
+        let (tx, rx) = bounded(self.tcp_threads_number as usize * 2);
+        spawn(move || check_hosts(hosts, tx.clone()));
+        let agent_pool = Arc::new(std::sync::Mutex::new(()));
+    }
+
 }

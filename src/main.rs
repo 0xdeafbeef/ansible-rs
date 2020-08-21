@@ -70,7 +70,7 @@ fn main() {
         .expect("Failed building ssh_processor instance");
     let len = hosts.len();
     let handler = spawn(move || incremental_save(channel, len));
-    ssh_processor.parallel_ssh_process(hosts);
+    ssh_processor.parallel_command_evaluation(hosts);
     handler.join().unwrap();
 }
 
