@@ -20,9 +20,9 @@ pub struct OutputProps {
 pub struct Config {
     pub threads: usize,
     pub agent_parallelism: isize,
-    pub output: OutputProps,
     pub command: String,
     pub timeout: u32,
+    pub output: OutputProps,
 }
 
 impl Default for OutputProps {
