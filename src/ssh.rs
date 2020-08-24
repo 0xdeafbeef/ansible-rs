@@ -4,7 +4,7 @@ use rayon::prelude::*;
 use serde::Serialize;
 use smol::future::FutureExt;
 use smol::{io, Async, Timer};
-use ssh2::Session;
+use ssh2::{Channel, Session};
 
 use crate::modules::ModuleProps;
 use std::collections::HashMap;
@@ -135,7 +135,7 @@ impl ParallelSshProps {
                 (hostname, command.clone(), ip)
             })
             .map(|(hostname, command, ip)| {
-                self.process_host::<SocketAddr>(hostname, ip, command.to_string())
+                self.process_host::<SocketAddr>(None, None, hostname, ip, command.to_string())
             })
             .for_each(|x| drop(x));
     }
@@ -153,9 +153,15 @@ impl ParallelSshProps {
         spawn(move || Self::check_hosts(hosts, tx.clone()));
     }
 
-    fn process_host<A>(&self, hostname: String, ip: Result<SocketAddr, Error>, command: String)
-    where
-        A: ToSocketAddrs + Display + Sync + Clone + Send + Debug,
+    fn process_host<HOSTNAME>(
+        &self,
+        auth: Option<fn(&Session)->Result<(), Error>>,
+        process: Option<Box<dyn FnMut(&mut Channel) -> Result<(), Error>>>,
+        hostname: String,
+        ip: Result<SocketAddr, Error>,
+        command: String,
+    ) where
+        HOSTNAME: ToSocketAddrs + Display + Sync + Clone + Send + Debug,
     {
         let tx = self.sender.clone();
         let hostname = match ip {
@@ -173,10 +179,31 @@ impl ParallelSshProps {
             }
         };
         let start_time = Instant::now();
+        let auth = match auth {
+            Some(a) => a,
+            None => |sess: &Session| -> Result<(), Error> {
+             let res =   sess.userauth_agent("scan");
+                if let Err(e) = res{
+                    return Err(Error::new(e))
+                };
+                Ok(())
+            },
+        };
+        let mut process = match process{
+            Some(a)=>a,
+            None=> Box::new(|chan: &mut Channel| -> Result<(), Error> {
+                let res =   chan.exec(&command);
+                if let Err(e) = res{
+                    return Err(Error::new(e))
+                };
+                Ok(())
+            })
+        };
         let result: Result<String, Error> = Self::process_host_inner(
             hostname.clone(),
-            command,
             self.agent_connections_pool.clone(),
+            auth,
+            &mut process
         );
         let process_time = Instant::now() - start_time;
         let res = match result {
@@ -205,13 +232,15 @@ impl ParallelSshProps {
         // );
     }
 
-    fn process_host_inner<A>(
-        ip: A,
-        command: String,
+    fn process_host_inner<HOSTNAME>(
+        ip: HOSTNAME,
         agent_pool: Arc<Semaphore>,
+        auth: fn(&Session)->Result<(), Error>,
+        process: &mut dyn FnMut(&mut Channel) -> Result<(), Error>
     ) -> Result<String, Error>
     where
-        A: ToSocketAddrs + Display + Sync + Clone + Send + Debug,
+        HOSTNAME: ToSocketAddrs + Display + Sync + Clone + Send + Debug,
+
     {
         const TIMEOUT: u32 = 60000;
 
@@ -223,14 +252,14 @@ impl ParallelSshProps {
         sess.handshake()
             .map_err(|e| Error::msg(format!("Failed establishing handshake: {}", e)))?;
         let guard = agent_pool.access();
+        auth(&sess).map_err(|e| Error::msg(format!("Authentication Error {}", e)))?;
         sess.userauth_agent("scan")
             .map_err(|e| Error::msg(format!("Error connecting via an agent: {}", e)))?;
         drop(guard);
         let mut channel = sess
             .channel_session()
             .map_err(|e| Error::msg(format!("Failed opening channel: {}", e)))?;
-        channel
-            .exec(&command)
+        process(&mut channel)
             .map_err(|e| Error::msg(format!("Failed executing command in a channel: {}", e)))?;
         let mut channel_buffer = String::with_capacity(4096);
         channel
@@ -262,7 +291,7 @@ impl ParallelSshProps {
     fn check_hosts<A, I>(hosts: I, tx: Sender<(String, Result<SocketAddr, Error>)>)
     where
         A: Display + ToSocketAddrs + Send + Sync + Clone + Debug,
-        I: IntoIterator<Item = (A)>,
+        I: IntoIterator<Item = A>,
     {
         smol::run(async {
             for host in hosts {
