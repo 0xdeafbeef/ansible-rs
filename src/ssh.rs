@@ -6,7 +6,8 @@ use smol::future::FutureExt;
 use smol::{io, Async, Timer};
 use ssh2::Session;
 
-use crate::modules::ModuleProps;
+use ansible_modules::{AuthType, ConnectionProps};
+use ansible_modules::{CommandOutput, ModuleTree};
 use std::collections::HashMap;
 use std::fmt::{Debug, Display};
 use std::io::Read;
@@ -32,6 +33,7 @@ pub struct ParallelSshProps {
     timeout_ssh: Duration,
     sender: Sender<Response>,
     tcp_threads_number: isize,
+    modules: Option<ModuleTree>,
 }
 
 impl Default for ParallelSshPropsBuilder {
@@ -42,6 +44,7 @@ impl Default for ParallelSshPropsBuilder {
             timeout_socket: Some(Duration::from_millis(200)),
             timeout_ssh: Some(Duration::from_secs(120)),
             tcp_threads_number: Some(10),
+            module_tree: None,
         }
     }
 }
@@ -54,22 +57,31 @@ impl ParallelSshPropsBuilder {
         new.tcp_threads_number = Some(a);
         new
     }
+    pub fn set_module_tree(&mut self, a: ModuleTree) -> &mut Self {
+        let mut new = self;
+        new.module_tree = Some(a);
+        new
+    }
+
     pub fn agent_connections_pool(&mut self, a: isize) -> &mut Self {
         let mut new = self;
         let sem = Semaphore::new(a);
         new.agent_parallelism = Some(Arc::new(sem));
         new
     }
+
     pub fn timeout_socket(&mut self, a: Duration) -> &mut Self {
         let mut new = self;
         new.timeout_socket = Some(a);
         new
     }
+
     pub fn timeout_ssh(&mut self, a: Duration) -> &mut Self {
         let mut new = self;
         new.timeout_ssh = Some(a);
         new
     }
+
     pub fn build(&self) -> Result<(Receiver<Response>, ParallelSshProps), String> {
         let (tx, rx) = unbounded();
         Ok((
@@ -97,6 +109,7 @@ impl ParallelSshPropsBuilder {
                     .tcp_threads_number
                     .clone()
                     .ok_or("maximum_connections must be initialized")?,
+                modules: self.module_tree.clone(),
                 sender: tx,
             },
         ))
@@ -110,6 +123,29 @@ pub struct ParallelSshPropsBuilder {
     timeout_socket: Option<Duration>,
     timeout_ssh: Option<Duration>,
     tcp_threads_number: Option<isize>,
+    module_tree: Option<ModuleTree>,
+}
+
+impl ConnectionProps for ParallelSshProps {
+    fn get_timeout(&self) -> u32 {
+        self.timeout_ssh.as_millis() as u32
+    }
+
+    fn tcp_synchronization(&self) {
+        self.tcp_connections_pool.acquire()
+    }
+
+    fn agent_synchronization(&self) {
+        self.agent_connections_pool.acquire()
+    }
+
+    fn tcp_release(&self) {
+        self.tcp_connections_pool.release()
+    }
+
+    fn agent_release(&self) {
+        self.agent_connections_pool.release()
+    }
 }
 
 impl ParallelSshProps {
@@ -140,17 +176,66 @@ impl ParallelSshProps {
             .for_each(|x| drop(x));
     }
 
-    pub fn parallel_module_evaluation<A: 'static, I: 'static, LIST: 'static>(
-        &self,
-        hosts: I,
-        module: LIST,
-    ) where
+    fn send_result(&self, hostname: String, res: Result<CommandOutput, Error>) {
+        let (status, result) = match res {
+            Ok(a) => (
+                true,
+                match a {
+                    CommandOutput::Multi(map) => serde_json::to_string(&map).unwrap(),
+                    CommandOutput::Single(str) => str,
+                },
+            ),
+            Err(e) => (false, e.to_string()),
+        };
+        if let Err(e) = self.sender.send(Response {
+            hostname,
+            status,
+            result,
+            process_time: Duration::from_secs(0),
+        }) {
+            eprintln!("Error while sending result via a channel: {}", e);
+        }
+    }
+
+    pub fn parallel_module_evaluation<A: 'static, I: 'static>(&self, hosts: I, module_name: String)
+    where
         A: Display + ToSocketAddrs + Send + Sync + Clone + Debug,
         I: IntoIterator<Item = A> + Send,
-        LIST: IntoIterator<Item = ModuleProps> + Send,
     {
         let (tx, rx) = bounded(self.tcp_threads_number as usize * 2);
         spawn(move || Self::check_hosts(hosts, tx.clone()));
+        let modules = self.modules.clone().expect("Modules are not initialized");
+        rx.into_iter()
+            .par_bridge()
+            .filter_map(|(hostname, ip)| {
+                let sock = match ip {
+                    Ok(sock) => sock,
+                    Err(e) => {
+                        if let Err(e) = self.sender.send(Response {
+                            result: format!("Failed connecting: {}", e),
+                            hostname,
+                            process_time: Duration::from_secs(0),
+                            status: false,
+                        }) {
+                            eprintln!("Failed sending result via channel: {}", e);
+                        }
+                        return None;
+                    }
+                };
+                Some((hostname, sock))
+            })
+            .map(|(hostname, sock)| {
+                (
+                    hostname,
+                    modules.run_module(
+                        &module_name,
+                        sock,
+                        AuthType::AgentFirst("scan".into()),
+                        self as &dyn ConnectionProps,
+                    ),
+                )
+            })
+            .for_each(|(hostname, res)| self.send_result(hostname, res));
     }
 
     fn process_host<A>(&self, hostname: String, ip: Result<SocketAddr, Error>, command: String)
@@ -258,11 +343,11 @@ impl ParallelSshProps {
             .await?;
         Ok(address)
     }
-
+    ///checks host and returns `SocketAddr` in case of successful connection
     fn check_hosts<A, I>(hosts: I, tx: Sender<(String, Result<SocketAddr, Error>)>)
     where
         A: Display + ToSocketAddrs + Send + Sync + Clone + Debug,
-        I: IntoIterator<Item = (A)>,
+        I: IntoIterator<Item = A>,
     {
         smol::run(async {
             for host in hosts {
