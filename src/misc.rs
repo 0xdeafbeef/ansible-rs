@@ -1,7 +1,7 @@
-use crate::Response;
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::fs;
+
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::net::Ipv4Addr;
@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 #[derive(Deserialize, Debug, Clone, Serialize)]
 pub struct OutputProps {
     pub save_to_file: bool,
-    pub filename: Option<String>,
+    pub filename: String,
     pub pretty_format: bool,
     pub show_progress: bool,
     pub keep_incremental_data: Option<bool>,
@@ -23,14 +23,15 @@ pub struct Config {
     pub agent_parallelism: isize,
     pub command: String,
     pub timeout: u32,
-    pub output: OutputProps,
+    pub modules_root: Option<PathBuf>,
+    pub output: OutputProps, //should be last field
 }
 
 impl Default for OutputProps {
     fn default() -> Self {
         OutputProps {
             save_to_file: false,
-            filename: None,
+            filename: String::default(),
             pretty_format: false,
             show_progress: false,
             keep_incremental_data: Some(false),
@@ -47,6 +48,7 @@ impl Default for Config {
             command: "uptime".to_string(),
             output: OutputProps::default(),
             timeout: 60,
+            modules_root: Some(PathBuf::from("./modules")),
         }
     }
 }
@@ -84,59 +86,59 @@ pub fn generate_kv_hosts_from_csv(
     }
     Ok(map)
 }
-
-pub fn get_config(path: &Path) -> Config {
-    let f = match fs::read_to_string(path) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("Failed reading config. Using default values : {}", e);
-            return Config::default();
-        }
-    };
-    match toml::from_str(f.as_str()) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("Error parsing config:{}", e);
-            Config::default()
-        }
-    }
-}
-
-pub fn save_to_file(conf: &Config, data: Vec<Response>) {
-    let filename = match &conf.output.filename {
-        None => {
-            eprintln!("Filename to save is not given. Printing to stdout.");
-            save_to_console(&conf, &data);
-            return;
-        }
-        Some(a) => Path::new(a.as_str()),
-    };
-
-    let file = match File::create(filename) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("Erorr saving content to file:{}", e);
-            save_to_console(&conf, &data);
-            return;
-        }
-    };
-    if conf.output.pretty_format {
-        match serde_json::to_writer_pretty(file, &data) {
-            Ok(_) => println!("Saved successfully"),
-            Err(e) => eprintln!("Error saving: {}", e),
-        };
-    } else {
-        match serde_json::to_writer(file, &data) {
-            Ok(_) => println!("Saved successfully"),
-            Err(e) => eprintln!("Error saving: {}", e),
-        }
-    }
-}
-
-pub fn save_to_console(conf: &Config, data: &Vec<Response>) {
-    if conf.output.pretty_format {
-        println!("{}", serde_json::to_string_pretty(&data).unwrap())
-    } else {
-        println!("{}", serde_json::to_string(&data).unwrap())
-    }
-}
+//
+// pub fn get_config(path: &Path) -> Config {
+//     let f = match fs::read_to_string(path) {
+//         Ok(a) => a,
+//         Err(e) => {
+//             eprintln!("Failed reading config. Using default values : {}", e);
+//             return Config::default();
+//         }
+//     };
+//     match toml::from_str(f.as_str()) {
+//         Ok(t) => t,
+//         Err(e) => {
+//             eprintln!("Error parsing config:{}", e);
+//             Config::default()
+//         }
+//     }
+// }
+//
+// pub fn save_to_file(conf: &Config, data: Vec<Response>) {
+//     let filename = match &conf.output.filename {
+//         None => {
+//             eprintln!("Filename to save is not given. Printing to stdout.");
+//             save_to_console(&conf, &data);
+//             return;
+//         }
+//         Some(a) => Path::new(a.as_str()),
+//     };
+//
+//     let file = match File::create(filename) {
+//         Ok(a) => a,
+//         Err(e) => {
+//             eprintln!("Erorr saving content to file:{}", e);
+//             save_to_console(&conf, &data);
+//             return;
+//         }
+//     };
+//     if conf.output.pretty_format {
+//         match serde_json::to_writer_pretty(file, &data) {
+//             Ok(_) => println!("Saved successfully"),
+//             Err(e) => eprintln!("Error saving: {}", e),
+//         };
+//     } else {
+//         match serde_json::to_writer(file, &data) {
+//             Ok(_) => println!("Saved successfully"),
+//             Err(e) => eprintln!("Error saving: {}", e),
+//         }
+//     }
+// }
+//
+// pub fn save_to_console(conf: &Config, data: &Vec<Response>) {
+//     if conf.output.pretty_format {
+//         println!("{}", serde_json::to_string_pretty(&data).unwrap())
+//     } else {
+//         println!("{}", serde_json::to_string(&data).unwrap())
+//     }
+// }

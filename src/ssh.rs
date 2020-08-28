@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::fmt::{Debug, Display};
 use std::io::Read;
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc};
 use std::thread::spawn;
 use std::time::{Duration, Instant};
 use std_semaphore::Semaphore;
@@ -158,7 +158,7 @@ impl ParallelSshProps {
             hosts.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
         let (tx, rx) = bounded(self.tcp_threads_number as usize * 2);
         {
-            let hosts: Vec<_> = lookup_table.clone().into_iter().map(|(k, v)| k).collect();
+            let hosts: Vec<_> = lookup_table.clone().into_iter().map(|(k, _v)| k).collect();
             spawn(move || Self::check_hosts(hosts, tx.clone()));
         }
 
@@ -240,7 +240,7 @@ impl ParallelSshProps {
 
     fn process_host<HOSTNAME>(
         &self,
-        auth: Option<fn(&Session)->Result<(), Error>>,
+        auth: Option<fn(&Session) -> Result<(), Error>>,
         process: Option<Box<dyn FnMut(&mut Channel) -> Result<(), Error>>>,
         hostname: String,
         ip: Result<SocketAddr, Error>,
@@ -267,28 +267,28 @@ impl ParallelSshProps {
         let auth = match auth {
             Some(a) => a,
             None => |sess: &Session| -> Result<(), Error> {
-             let res =   sess.userauth_agent("scan");
-                if let Err(e) = res{
-                    return Err(Error::new(e))
+                let res = sess.userauth_agent("scan");
+                if let Err(e) = res {
+                    return Err(Error::new(e));
                 };
                 Ok(())
             },
         };
-        let mut process = match process{
-            Some(a)=>a,
-            None=> Box::new(|chan: &mut Channel| -> Result<(), Error> {
-                let res =   chan.exec(&command);
-                if let Err(e) = res{
-                    return Err(Error::new(e))
+        let mut process = match process {
+            Some(a) => a,
+            None => Box::new(|chan: &mut Channel| -> Result<(), Error> {
+                let res = chan.exec(&command);
+                if let Err(e) = res {
+                    return Err(Error::new(e));
                 };
                 Ok(())
-            })
+            }),
         };
         let result: Result<String, Error> = Self::process_host_inner(
             hostname.clone(),
             self.agent_connections_pool.clone(),
             auth,
-            &mut process
+            &mut process,
         );
         let process_time = Instant::now() - start_time;
         let res = match result {
@@ -320,12 +320,11 @@ impl ParallelSshProps {
     fn process_host_inner<HOSTNAME>(
         ip: HOSTNAME,
         agent_pool: Arc<Semaphore>,
-        auth: fn(&Session)->Result<(), Error>,
-        process: &mut dyn FnMut(&mut Channel) -> Result<(), Error>
+        auth: fn(&Session) -> Result<(), Error>,
+        process: &mut dyn FnMut(&mut Channel) -> Result<(), Error>,
     ) -> Result<String, Error>
     where
         HOSTNAME: ToSocketAddrs + Display + Sync + Clone + Send + Debug,
-
     {
         const TIMEOUT: u32 = 60000;
 

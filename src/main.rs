@@ -1,11 +1,10 @@
-use ansible_rs::ssh::{ParallelSshProps, ParallelSshPropsBuilder, Response};
+use ansible_rs::ssh::{ParallelSshPropsBuilder, Response};
 use chrono::Utc;
-use clap::crate_version;
-use clap::{App, Arg};
+
+
 use color_backtrace;
 use crossbeam_channel::Receiver;
 use indicatif::{ProgressBar, ProgressStyle};
-use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -17,9 +16,11 @@ use std::thread::spawn;
 use std::time::Duration;
 
 mod misc;
-use misc::{generate_kv_hosts_from_csv, get_config, hosts_builder, Config};
+use ansible_modules::ModuleTree;
+use misc::{generate_kv_hosts_from_csv, hosts_builder, Config};
 use std::net::SocketAddr;
 use structopt::StructOpt;
+
 
 #[derive(StructOpt, Debug)]
 #[structopt(name = "ansible-rs")]
@@ -32,28 +33,49 @@ struct Args {
     #[structopt(long, default_value = "list")]
     hosts_format: String,
     #[structopt(long, short, help = "Module name")]
-    module: Option<String>,
+    module: Option<Vec<String>>,
 }
 
 fn main() {
+    enum Hosts{
+        Kv(BTreeMap<SocketAddr, String>),
+        Linear(Vec<SocketAddr>)
+    }
     color_backtrace::install();
     let args: Args = Args::from_args();
     let config: Config = confy::load_path(args.config).unwrap();
     let command = &config.command;
-
-    let hosts = if args.hosts_format == "csv" {
-        let hosts = generate_kv_hosts_from_csv(&args.hosts).unwrap();
-        hosts
-            .into_iter()
-            .map(|(ad, com)| (SocketAddr::new(IpAddr::from(ad), 22), com))
-            .collect()
-    } else {
-        let mut map = BTreeMap::new();
-        for h in hosts_builder(&args.hosts) {
-            map.insert(SocketAddr::new(IpAddr::from(h), 22), command.clone());
-        }
-        map
+    let hosts=
+    if args.module.is_none()
+    {
+        Hosts::Kv(
+         if args.hosts_format == "csv" {
+            let hosts = generate_kv_hosts_from_csv(&args.hosts).unwrap();
+            hosts
+                .into_iter()
+                .map(|(ad, com)| (SocketAddr::new(IpAddr::from(ad), 22), com))
+                .collect()
+        } else {
+            let mut map = BTreeMap::new();
+            for h in hosts_builder(&args.hosts) {
+                map.insert(SocketAddr::new(IpAddr::from(h), 22), command.clone());
+            }
+            map
+        })
+    }
+    else {
+        Hosts::Linear(
+            hosts_builder(&args.hosts)
+                .into_iter()
+                .map(|h|SocketAddr::new(IpAddr::from(h), 22))
+                .collect()
+        )
     };
+    let len = match &hosts {
+        Hosts::Kv(a)=>a.len(),
+        Hosts::Linear(a)=>a.len()
+    };
+    let save_filename= config.output.filename.clone();
 
     dbg!(&config);
     ThreadPoolBuilder::new()
@@ -61,16 +83,29 @@ fn main() {
         .build_global()
         .expect("failed creating pool");
 
-    let (channel, ssh_processor): (_, ParallelSshProps) = ParallelSshPropsBuilder::default()
+    let mut builder = ParallelSshPropsBuilder::default();
+    builder
         .agent_connections_pool(config.agent_parallelism)
         .tcp_connections_pool(config.threads as isize)
         .timeout_socket(Duration::from_millis(config.timeout as u64))
-        .timeout_ssh(Duration::from_secs(60))
-        .build()
-        .expect("Failed building ssh_processor instance");
-    let len = hosts.len();
-    let handler = spawn(move || incremental_save(channel, len));
-    ssh_processor.parallel_command_evaluation(hosts);
+        .timeout_ssh(Duration::from_secs(60));
+    let (channel, ssh_processor) = match args.module {
+        Some(_) => builder.set_module_tree(ModuleTree::new(
+            &config
+                .modules_root
+                .expect("Module flag set, but there is no modules_root in config"),
+        )),
+        None => &mut builder,
+    }
+    .build()
+    .expect("Failed building ssh_processor instance");
+
+    let handler = spawn(move || incremental_save(channel, len, &save_filename));
+    match hosts{
+        Hosts::Linear(hosts) => {
+            ssh_processor.parallel_module_evaluation(hosts, args.module.unwrap()[0].clone()) },
+       Hosts::Kv(hosts)=>ssh_processor.parallel_command_evaluation(hosts)
+    };
     handler.join().unwrap();
 }
 
@@ -83,7 +118,7 @@ fn progress_bar_creator(queue_len: u64) -> ProgressBar {
     total_hosts_processed
 }
 
-fn config_incremental_folders() -> File {
+fn config_incremental_folders() -> (File, PathBuf) {
     let datetime = Utc::now().format("%H_%M_%S").to_string();
     let filename = &datetime;
     let store_dir_date = Utc::today().format("%d_%B_%Y").to_string();
@@ -92,7 +127,7 @@ fn config_incremental_folders() -> File {
             .expect("Failed creating dir for temporary save");
     }
     let incremental_name = PathBuf::from(store_dir_date + "/incremental_" + &filename + ".json");
-    File::create(incremental_name).expect("incremental salving failed.")
+    (File::create(&incremental_name.clone()).expect("incremental salving failed."),incremental_name)
 }
 enum Stat {
     Ok,
@@ -122,8 +157,8 @@ fn progress_bar_display(queue_len: u64, rx: std::sync::mpsc::Receiver<Stat>) {
     }
 }
 
-fn incremental_save(rx: Receiver<Response>, stream_len: usize) {
-    let mut file = config_incremental_folders();
+fn incremental_save(rx: Receiver<Response>, stream_len: usize, config_filename: &str) {
+    let (mut file,name) = config_incremental_folders();
     let len = stream_len;
     let (sender, reciever) = std::sync::mpsc::channel();
     std::thread::spawn(move || progress_bar_display(len as u64, reciever));
@@ -146,4 +181,5 @@ fn incremental_save(rx: Receiver<Response>, stream_len: usize) {
         }
     }
     file.flush().expect("Failed flushing");
+    std::fs::rename(&name,&config_filename).expect("Failed moving temp file to location specified in the config :(");
 }
