@@ -1,6 +1,6 @@
 [package]
 name = "ansible-rs"
-version = "2.0.0"
+version = "2.0.1"
 authors = ["0xd34db33f <0xd34db33f@noreply.github.com>"]
 edition = "2018"
 
@@ -22,13 +22,13 @@ std-semaphore = "0.1"
 rayon = "1.1"
 csv = "1.1"
 chrono = "0.4"
-xz2 = "0.1"
+#xz2 = "0.1"
 anyhow ="1.0.32"
 smol ="0.3.3"
 futures = "0.3.5"
 crossbeam-channel = "0.4.3"
 confy = "0.4.0"
-walkdir ="2.3.1"
 structopt ="0.3.16"
+ansible_modules = {git="https://github.com/0xdeafbeef/ansible-modules"}
 [profile.release]
 lto = true
