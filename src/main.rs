@@ -1,7 +1,6 @@
 use ansible_rs::ssh::{ParallelSshPropsBuilder, Response};
 use chrono::Utc;
 
-
 use color_backtrace;
 use crossbeam_channel::Receiver;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -21,7 +20,6 @@ use misc::{generate_kv_hosts_from_csv, hosts_builder, Config};
 use std::net::SocketAddr;
 use structopt::StructOpt;
 
-
 #[derive(StructOpt, Debug)]
 #[structopt(name = "ansible-rs")]
 struct Args {
@@ -37,19 +35,16 @@ struct Args {
 }
 
 fn main() {
-    enum Hosts{
+    enum Hosts {
         Kv(BTreeMap<SocketAddr, String>),
-        Linear(Vec<SocketAddr>)
+        Linear(Vec<SocketAddr>),
     }
     color_backtrace::install();
     let args: Args = Args::from_args();
     let config: Config = confy::load_path(args.config).unwrap();
     let command = &config.command;
-    let hosts=
-    if args.module.is_none()
-    {
-        Hosts::Kv(
-         if args.hosts_format == "csv" {
+    let hosts = if args.module.is_none() {
+        Hosts::Kv(if args.hosts_format == "csv" {
             let hosts = generate_kv_hosts_from_csv(&args.hosts).unwrap();
             hosts
                 .into_iter()
@@ -62,20 +57,19 @@ fn main() {
             }
             map
         })
-    }
-    else {
+    } else {
         Hosts::Linear(
             hosts_builder(&args.hosts)
                 .into_iter()
-                .map(|h|SocketAddr::new(IpAddr::from(h), 22))
-                .collect()
+                .map(|h| SocketAddr::new(IpAddr::from(h), 22))
+                .collect(),
         )
     };
     let len = match &hosts {
-        Hosts::Kv(a)=>a.len(),
-        Hosts::Linear(a)=>a.len()
+        Hosts::Kv(a) => a.len(),
+        Hosts::Linear(a) => a.len(),
     };
-    let save_filename= config.output.filename.clone();
+    let save_filename = config.output.filename.clone();
 
     dbg!(&config);
     ThreadPoolBuilder::new()
@@ -93,7 +87,7 @@ fn main() {
         Some(_) => builder.set_module_tree(ModuleTree::new(
             &config
                 .modules_root
-                .expect("Module flag set, but there is no modules_root in config"),
+                .expect("Module flag set, but there is no `modules_root` in config"),
         )),
         None => &mut builder,
     }
@@ -101,10 +95,15 @@ fn main() {
     .expect("Failed building ssh_processor instance");
 
     let handler = spawn(move || incremental_save(channel, len, &save_filename));
-    match hosts{
+    match hosts {
         Hosts::Linear(hosts) => {
-            ssh_processor.parallel_module_evaluation(hosts, args.module.unwrap()[0].clone()) },
-       Hosts::Kv(hosts)=>ssh_processor.parallel_command_evaluation(hosts)
+            if let None =
+                ssh_processor.parallel_module_evaluation(hosts, args.module.unwrap()[0].clone())
+            {
+                return;
+            }
+        }
+        Hosts::Kv(hosts) => ssh_processor.parallel_command_evaluation(hosts),
     };
     handler.join().unwrap();
 }
@@ -127,7 +126,10 @@ fn config_incremental_folders() -> (File, PathBuf) {
             .expect("Failed creating dir for temporary save");
     }
     let incremental_name = PathBuf::from(store_dir_date + "/incremental_" + &filename + ".json");
-    (File::create(&incremental_name.clone()).expect("incremental salving failed."),incremental_name)
+    (
+        File::create(&incremental_name).expect("incremental salving failed."),
+        incremental_name,
+    )
 }
 enum Stat {
     Ok,
@@ -157,16 +159,32 @@ fn progress_bar_display(queue_len: u64, rx: std::sync::mpsc::Receiver<Stat>) {
     }
 }
 
+fn create_tmp_folder_for_token_failed_hosts(name: &str) -> std::io::Result<File> {
+    File::create(&name)
+}
+
 fn incremental_save(rx: Receiver<Response>, stream_len: usize, config_filename: &str) {
-    let (mut file,name) = config_incremental_folders();
+    let (mut file, name) = config_incremental_folders();
     let len = stream_len;
     let (sender, reciever) = std::sync::mpsc::channel();
     std::thread::spawn(move || progress_bar_display(len as u64, reciever));
+    let temp_name = name.to_string_lossy().to_string() + "token_failed.txt";
+    let mut failed_token_dump = create_tmp_folder_for_token_failed_hosts(&temp_name)
+        .expect("Failed creating file for hosts failed with token");
+    let mut token_failed = false;
     for _ in 0..len {
         if let Ok(received) = rx.recv() {
             let stat = if received.status {
                 Stat::Ok
             } else if received.result.contains("[-19]") {
+                token_failed = true;
+                failed_token_dump
+                    .write_all((&received.hostname).as_ref())
+                    .expect("Failed writing name of failed file");
+                failed_token_dump
+                    .write_all(b"\r\n")
+                    .expect("Failed writing name of failed file");
+
                 Stat::TokenFail
             } else {
                 Stat::Fail
@@ -181,5 +199,9 @@ fn incremental_save(rx: Receiver<Response>, stream_len: usize, config_filename: 
         }
     }
     file.flush().expect("Failed flushing");
-    std::fs::rename(&name,&config_filename).expect("Failed moving temp file to location specified in the config :(");
+    std::fs::rename(&name, &config_filename)
+        .expect("Failed moving temp file to location specified in the config :(");
+    if !token_failed {
+        std::fs::remove_file(&temp_name).expect("Failed removing temp file");
+    }
 }

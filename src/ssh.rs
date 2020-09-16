@@ -12,10 +12,10 @@ use std::collections::HashMap;
 use std::fmt::{Debug, Display};
 use std::io::Read;
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::sync::{Arc};
+use std::sync::Arc;
 use std::thread::spawn;
 use std::time::{Duration, Instant};
-use std_semaphore::Semaphore;
+use std_semaphore::{Semaphore, SemaphoreGuard};
 
 #[derive(Serialize, Debug, Clone)]
 pub struct Response {
@@ -59,6 +59,7 @@ impl ParallelSshPropsBuilder {
     }
     pub fn set_module_tree(&mut self, a: ModuleTree) -> &mut Self {
         let mut new = self;
+        dbg!(&a);
         new.module_tree = Some(a);
         new
     }
@@ -136,6 +137,7 @@ impl ConnectionProps for ParallelSshProps {
     }
 
     fn agent_synchronization(&self) {
+        println!("Acquire agent");
         self.agent_connections_pool.acquire()
     }
 
@@ -144,6 +146,7 @@ impl ConnectionProps for ParallelSshProps {
     }
 
     fn agent_release(&self) {
+        println!("Release agent");
         self.agent_connections_pool.release()
     }
 }
@@ -197,14 +200,22 @@ impl ParallelSshProps {
         }
     }
 
-    pub fn parallel_module_evaluation<A: 'static, I: 'static>(&self, hosts: I, module_name: String)
+    pub fn parallel_module_evaluation<A: 'static, I: 'static>(
+        &self,
+        hosts: I,
+        module_name: String,
+    ) -> Option<()>
     where
         A: Display + ToSocketAddrs + Send + Sync + Clone + Debug,
         I: IntoIterator<Item = A> + Send,
     {
         let (tx, rx) = bounded(self.tcp_threads_number as usize * 2);
+        let modules: ModuleTree = self.modules.clone().expect("Modules are not initialized");
+        if !modules.check_module(&module_name) {
+            eprintln!("Module {} is not found", &module_name);
+            return None;
+        }
         spawn(move || Self::check_hosts(hosts, tx.clone()));
-        let modules = self.modules.clone().expect("Modules are not initialized");
         rx.into_iter()
             .par_bridge()
             .filter_map(|(hostname, ip)| {
@@ -236,6 +247,7 @@ impl ParallelSshProps {
                 )
             })
             .for_each(|(hostname, res)| self.send_result(hostname, res));
+        Some(())
     }
 
     fn process_host<HOSTNAME>(
